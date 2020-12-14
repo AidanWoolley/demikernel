@@ -5,14 +5,27 @@ use crate::{
     engine::Engine,
     protocols::{
         arp,
-        ethernet::MacAddress,
+        ethernet2::MacAddress,
         tcp,
     },
-    runtime::Runtime,
+    runtime::{
+        PKTBUF_SIZE,
+        PacketBuf,
+        PacketSerialize,
+        Runtime,
+    },
+    scheduler::{
+        Operation,
+        Scheduler,
+        SchedulerHandle,
+    },
     timer::{
         Timer,
         TimerRc,
     },
+};
+use futures::{
+    FutureExt,
 };
 use rand::{
     distributions::{
@@ -26,6 +39,7 @@ use rand::{
 use std::{
     cell::RefCell,
     collections::VecDeque,
+    future::Future,
     net::Ipv4Addr,
     rc::Rc,
     time::{
@@ -47,6 +61,7 @@ pub type TestEngine = Engine<TestRuntime>;
 #[derive(Clone)]
 pub struct TestRuntime {
     inner: Rc<RefCell<Inner>>,
+    scheduler: Scheduler<Operation<TestRuntime>>,
 }
 
 impl TestRuntime {
@@ -68,19 +83,31 @@ impl TestRuntime {
             name,
             timer: TimerRc(Rc::new(Timer::new(now))),
             rng: SmallRng::from_seed([0; 16]),
+            incoming: VecDeque::new(),
             outgoing: VecDeque::new(),
             link_addr,
             ipv4_addr,
             tcp_options: tcp::Options::default(),
             arp_options,
+            pktbufs: vec![],
         };
         Self {
             inner: Rc::new(RefCell::new(inner)),
+            scheduler: Scheduler::new(),
         }
     }
 
-    pub fn pop_frame(&self) -> Vec<u8> {
+    pub fn pop_frame(&self) -> PacketBuf {
         self.inner.borrow_mut().outgoing.pop_front().unwrap()
+    }
+
+    pub fn push_frame(&self, buf: PacketBuf) {
+        self.inner.borrow_mut().incoming.push_back(buf);
+    }
+
+    pub fn poll_scheduler(&self) {
+        // let mut ctx = Context::from_waker(noop_waker_ref());
+        self.scheduler.poll();
     }
 }
 
@@ -89,22 +116,31 @@ struct Inner {
     name: &'static str,
     timer: TimerRc,
     rng: SmallRng,
-    outgoing: VecDeque<Vec<u8>>,
+    incoming: VecDeque<PacketBuf>,
+    outgoing: VecDeque<PacketBuf>,
 
     link_addr: MacAddress,
     ipv4_addr: Ipv4Addr,
     tcp_options: tcp::Options,
     arp_options: arp::Options,
+
+    pktbufs: Vec<Box<[u8; PKTBUF_SIZE]>>,
 }
 
 impl Runtime for TestRuntime {
     type WaitFuture = crate::timer::WaitFuture<TimerRc>;
 
-    fn transmit(&self, buf: Rc<RefCell<Vec<u8>>>) {
-        self.inner
-            .borrow_mut()
-            .outgoing
-            .push_back(buf.borrow_mut().clone());
+    fn transmit(&self, pkt: impl PacketSerialize) {
+        self.inner.borrow_mut().outgoing.push_back(pkt.serialize2());
+    }
+
+    fn receive(&self) -> Option<PacketBuf> {
+        self.inner.borrow_mut().incoming.pop_front();
+        todo!()
+    }
+
+    fn scheduler(&self) -> &Scheduler<Operation<Self>> {
+        &self.scheduler
     }
 
     fn local_link_addr(&self) -> MacAddress {
@@ -151,6 +187,25 @@ impl Runtime for TestRuntime {
     {
         let mut inner = self.inner.borrow_mut();
         inner.rng.gen()
+    }
+
+    fn spawn<F: Future<Output = ()> + 'static>(&self, future: F) -> SchedulerHandle {
+        self.scheduler
+            .insert(Operation::Background(future.boxed_local()))
+    }
+
+    fn alloc_pktbuf(&self) -> PacketBuf {
+        let mut inner = self.inner.borrow_mut();
+        let buf = inner.pktbufs.pop().unwrap_or_else(|| unsafe { Box::new_zeroed().assume_init() });
+        PacketBuf::new(buf)
+    }
+
+    fn free_pktbuf(&self, buf: PacketBuf) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(b) = buf.into_buf() {
+            let mut inner = self.inner.borrow_mut();
+            inner.pktbufs.push(b);
+        }
     }
 }
 

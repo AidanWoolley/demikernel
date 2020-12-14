@@ -3,12 +3,13 @@ use crate::{
     collections::watched::WatchedValue,
     fail::Fail,
     protocols::tcp::SeqNumber,
+    sync::Bytes,
 };
-use bytes::Bytes;
 use std::{
     cell::RefCell,
     collections::VecDeque,
     convert::TryInto,
+    fmt,
     num::Wrapping,
     time::{
         Duration,
@@ -59,6 +60,21 @@ pub struct Sender {
 
     pub retransmit_deadline: WatchedValue<Option<Instant>>,
     pub rto: RefCell<RtoCalculator>,
+}
+
+impl fmt::Debug for Sender {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Sender")
+            .field("base_seq_no", &self.base_seq_no)
+            .field("sent_seq_no", &self.sent_seq_no)
+            .field("unsent_seq_no", &self.unsent_seq_no)
+            .field("window_size", &self.window_size)
+            .field("window_scale", &self.window_scale)
+            .field("mss", &self.mss)
+            .field("retransmit_deadline", &self.retransmit_deadline)
+            .field("rto", &self.rto)
+            .finish()
+    }
 }
 
 impl Sender {
@@ -165,10 +181,10 @@ impl Sender {
 
     pub fn pop_one_unsent_byte(&self) -> Option<Bytes> {
         let mut queue = self.unsent_queue.borrow_mut();
-        let mut buf = queue.pop_front()?;
-        let remainder = buf.split_off(1);
+        let buf = queue.pop_front()?;
+        let (byte, remainder) = buf.split(1);
         queue.push_front(remainder);
-        Some(buf)
+        Some(byte)
     }
 
     pub fn pop_unsent(&self, max_bytes: usize) -> Option<Bytes> {
@@ -176,7 +192,8 @@ impl Sender {
         let mut unsent_queue = self.unsent_queue.borrow_mut();
         let mut buf = unsent_queue.pop_front()?;
         if buf.len() > max_bytes {
-            let tail = buf.split_off(max_bytes);
+            let (head, tail) = buf.split(max_bytes);
+            buf = head;
             unsent_queue.push_front(tail);
         }
         Some(buf)

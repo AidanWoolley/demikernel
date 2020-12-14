@@ -6,6 +6,7 @@
 #include <rte_ethdev.h>
 #include <rte_ether.h>
 #include <rte_mbuf.h>
+#include <dmtr/types.h>
 
 /*
 #include <rte_common.h>
@@ -19,7 +20,6 @@
 */
 
 int catnip_libos_noop();
-
 extern "C" {
   void catnip_libos_free_pkt(struct rte_mbuf *packet);
   struct rte_mbuf* catnip_libos_alloc_pkt(struct rte_mempool *mp);

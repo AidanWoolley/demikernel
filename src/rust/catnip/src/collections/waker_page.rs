@@ -1,4 +1,7 @@
-use futures::task::AtomicWaker;
+use crate::sync::{
+    SharedWaker,
+    WakerU64,
+};
 use std::{
     alloc::{
         AllocRef,
@@ -11,14 +14,6 @@ use std::{
         self,
         NonNull,
     },
-    sync::{
-        atomic::{
-            self,
-            AtomicU64,
-            Ordering,
-        },
-        Arc,
-    },
     task::{
         RawWaker,
         RawWakerVTable,
@@ -29,33 +24,83 @@ pub const WAKER_PAGE_SIZE: usize = 64;
 
 #[repr(align(64))]
 pub struct WakerPage {
-    refcount: AtomicU64,
-    ready: AtomicU64,
-    waker: Arc<AtomicWaker>,
-    _unused: [u8; 40],
+    refcount: WakerU64,
+    notified: WakerU64,
+    completed: WakerU64,
+    dropped: WakerU64,
+    waker: SharedWaker,
+    _unused: [u8; 24],
 }
 
 impl WakerPage {
-    pub fn new(waker: Arc<AtomicWaker>) -> WakerPageRef {
+    pub fn new(waker: SharedWaker) -> WakerPageRef {
         let layout = Layout::new::<WakerPage>();
         assert_eq!(layout.align(), 64);
         let mut ptr: NonNull<WakerPage> = Global.alloc(layout).expect("Allocation failed").cast();
         unsafe {
             let page = ptr.as_mut();
-            page.refcount.store(1, Ordering::SeqCst);
-            page.ready.store(0, Ordering::SeqCst);
+            ptr::write(&mut page.refcount as *mut _, WakerU64::new(1));
+            ptr::write(&mut page.notified as *mut _, WakerU64::new(0));
+            ptr::write(&mut page.completed as *mut _, WakerU64::new(0));
+            ptr::write(&mut page.dropped as *mut _, WakerU64::new(0));
             ptr::write(&mut page.waker as *mut _, waker);
         }
         WakerPageRef(ptr)
     }
 
-    pub fn wake(&self, ix: usize) {
+    pub fn notify(&self, ix: usize) {
         debug_assert!(ix < 64);
-        self.ready.fetch_or(1 << ix, Ordering::SeqCst);
+        self.notified.fetch_or(1 << ix);
+        self.waker.wake();
     }
 
-    pub fn get_ready(&self) -> u64 {
-        self.ready.load(Ordering::SeqCst)
+    pub fn take_notified(&self) -> u64 {
+        // Unset all ready bits, since spurious notifications for completed futures would lead
+        // us to poll them after completion.
+        let mut notified = self.notified.swap(0);
+        notified &= !self.completed.load();
+        notified &= !self.dropped.load();
+        notified
+    }
+
+    pub fn has_completed(&self, ix: usize) -> bool {
+        debug_assert!(ix < 64);
+        self.completed.load() & (1 << ix) != 0
+    }
+
+    pub fn mark_completed(&self, ix: usize) {
+        debug_assert!(ix < 64);
+        self.completed.fetch_or(1 << ix);
+    }
+
+    pub fn mark_dropped(&self, ix: usize) {
+        debug_assert!(ix < 64);
+        self.dropped.fetch_or(1 << ix);
+        self.waker.wake();
+    }
+
+    pub fn take_dropped(&self) -> u64 {
+        self.dropped.swap(0)
+    }
+
+    pub fn was_dropped(&self, ix: usize) -> bool {
+        debug_assert!(ix < 64);
+        self.dropped.load() & (1 << ix) != 0
+    }
+
+    pub fn initialize(&self, ix: usize) {
+        debug_assert!(ix < 64);
+        self.notified.fetch_or(1 << ix);
+        self.completed.fetch_and(!(1 << ix));
+        self.dropped.fetch_and(!(1 << ix));
+    }
+
+    pub fn clear(&self, ix: usize) {
+        debug_assert!(ix < 64);
+        let mask = !(1 << ix);
+        self.notified.fetch_and(mask);
+        self.completed.fetch_and(mask);
+        self.dropped.fetch_and(mask);
     }
 }
 
@@ -79,21 +124,13 @@ impl WakerPageRef {
             WakerRef(ptr)
         }
     }
-
-    pub fn take_ready(&self) -> u64 {
-        self.ready.swap(0, Ordering::SeqCst)
-    }
-
-    pub fn wake_many(&self, bitset: u64) {
-        self.ready.fetch_or(bitset, Ordering::SeqCst);
-    }
 }
 
 impl Clone for WakerPageRef {
     fn clone(&self) -> Self {
         let new_refcount = unsafe {
-            // See comment in `std::sync::Arc` for why `Relaxed` is safe.
-            self.0.as_ref().refcount.fetch_add(1, Ordering::Relaxed)
+            // TODO: We could use `Relaxed` here, see `std::sync::Arc` for documentation.
+            self.0.as_ref().refcount.fetch_add(1)
         };
         debug_assert!(new_refcount < std::isize::MAX as u64);
         Self(self.0)
@@ -103,10 +140,9 @@ impl Clone for WakerPageRef {
 impl Drop for WakerPageRef {
     fn drop(&mut self) {
         unsafe {
-            if self.0.as_ref().refcount.fetch_sub(1, Ordering::Release) != 1 {
+            if self.0.as_ref().refcount.fetch_sub(1) != 1 {
                 return;
             }
-            atomic::fence(Ordering::Acquire);
             ptr::drop_in_place(self.0.as_mut());
             Global.dealloc(self.0.cast(), Layout::for_value(self.0.as_ref()));
         }
@@ -141,7 +177,7 @@ impl WakerRef {
     fn wake_by_ref(&self) {
         let (base_ptr, offset) = self.base_ptr();
         let base = unsafe { &*base_ptr.as_ptr() };
-        base.wake(offset);
+        base.notify(offset);
     }
 
     fn wake(self) {
@@ -206,22 +242,20 @@ impl Drop for WakerRef {
 
 #[cfg(test)]
 mod tests {
-    use super::WakerPage;
-    use futures::task::AtomicWaker;
-    use std::{
-        mem,
-        sync::Arc,
+    use super::{
+        SharedWaker,
+        WakerPage,
     };
+    use std::mem;
 
     #[test]
     fn test_size() {
-        assert_eq!(mem::size_of::<Arc<AtomicWaker>>(), 8);
         assert_eq!(mem::size_of::<WakerPage>(), 64);
     }
 
     #[test]
     fn test_basic() {
-        let waker = Arc::new(AtomicWaker::new());
+        let waker = SharedWaker::new();
         let p = WakerPage::new(waker);
 
         let q = p.waker(0);
@@ -231,10 +265,10 @@ mod tests {
         q.wake();
         r.wake();
 
-        assert_eq!(p.take_ready(), 1 << 0 | 1 << 63);
+        assert_eq!(p.take_notified(), 1 << 0 | 1 << 63);
 
         s.wake();
 
-        assert_eq!(p.take_ready(), 1 << 16);
+        assert_eq!(p.take_notified(), 1 << 16);
     }
 }

@@ -7,16 +7,27 @@ use crate::bindings::{
 use catnip::{
     protocols::{
         arp,
-        ethernet::MacAddress,
+        ethernet2::MacAddress,
         tcp,
     },
-    runtime::Runtime,
+    runtime::{
+	PKTBUF_SIZE,
+        PacketBuf,
+        PacketSerialize,
+        Runtime,
+    },
+    scheduler::{
+        Operation,
+        Scheduler,
+        SchedulerHandle,
+    },
     timer::{
         Timer,
         TimerPtr,
         WaitFuture,
     },
 };
+use futures::FutureExt;
 use rand::{
     distributions::{
         Distribution,
@@ -28,7 +39,9 @@ use rand::{
 };
 use std::{
     cell::RefCell,
+    future::Future,
     mem,
+    mem::MaybeUninit,
     net::Ipv4Addr,
     ptr,
     rc::Rc,
@@ -38,6 +51,8 @@ use std::{
         Instant,
     },
 };
+
+const MAX_QUEUE_DEPTH: usize = 4;
 
 #[derive(Clone)]
 pub struct TimerRc(Rc<Timer<TimerRc>>);
@@ -49,8 +64,9 @@ impl TimerPtr for TimerRc {
 }
 
 #[derive(Clone)]
-pub struct LibOSRuntime {
+pub struct DPDKRuntime {
     inner: Rc<RefCell<Inner>>,
+    scheduler: Scheduler<Operation<Self>>,
 }
 
 extern "C" {
@@ -70,7 +86,7 @@ extern "C" {
     ) -> u16;
 }
 
-impl LibOSRuntime {
+impl DPDKRuntime {
     pub fn new(
         link_addr: MacAddress,
         ipv4_addr: Ipv4Addr,
@@ -80,7 +96,16 @@ impl LibOSRuntime {
         let mut rng = rand::thread_rng();
         let rng = SmallRng::from_rng(&mut rng).expect("Failed to initialize RNG");
         let now = Instant::now();
-        let inner = Inner {
+
+        let mut buffered: MaybeUninit<[PacketBuf; MAX_QUEUE_DEPTH]> = MaybeUninit::uninit();
+        for i in 0..MAX_QUEUE_DEPTH {
+            unsafe {
+                (buffered.as_mut_ptr() as *mut PacketBuf)
+                    .offset(i as isize)
+                    .write(PacketBuf::empty())
+            };
+        }
+        let mut inner = Inner {
             timer: TimerRc(Rc::new(Timer::new(now))),
             link_addr,
             ipv4_addr,
@@ -90,37 +115,19 @@ impl LibOSRuntime {
 
             dpdk_port_id,
             dpdk_mempool,
+
+            num_buffered: 0,
+            buffered: unsafe { buffered.assume_init() },
+            pktbufs: vec![],
         };
+        for _ in 0..16 {
+            inner.pktbufs.push(unsafe { Box::new_zeroed().assume_init() });
+        }
+
         Self {
             inner: Rc::new(RefCell::new(inner)),
+            scheduler: Scheduler::new(),
         }
-    }
-
-    pub fn receive(&self, mut packet_in: impl FnMut(&[u8])) -> usize {
-        let dpdk_port = { self.inner.borrow().dpdk_port_id };
-
-        const MAX_QUEUE_DEPTH: usize = 64;
-        let mut packets: [*mut rte_mbuf; MAX_QUEUE_DEPTH] = unsafe { mem::zeroed() };
-
-        // rte_eth_rx_burst is declared `inline` in the header.
-        let nb_rx = unsafe {
-            catnip_libos_eth_rx_burst(dpdk_port, 0, packets.as_mut_ptr(), MAX_QUEUE_DEPTH as u16)
-        };
-        // let dev = unsafe { rte_eth_devices[dpdk_port as usize] };
-        // let rx_burst = dev.rx_pkt_burst.expect("Missing RX burst function");
-        // // This only supports queue_id 0.
-        // let nb_rx = unsafe { (rx_burst)(*(*dev.data).rx_queues, todo!(), MAX_QUEUE_DEPTH as u16) };
-
-        for &packet in &packets[..nb_rx as usize] {
-            // auto * const p = rte_pktmbuf_mtod(packet, uint8_t *);
-            let p =
-                unsafe { ((*packet).buf_addr as *const u8).offset((*packet).data_off as isize) };
-            let data = unsafe { slice::from_raw_parts(p, (*packet).data_len as usize) };
-            packet_in(data);
-            unsafe { catnip_libos_free_pkt(packet as *const _ as *mut _) };
-        }
-
-        nb_rx as usize
     }
 }
 
@@ -134,33 +141,92 @@ struct Inner {
 
     dpdk_port_id: u16,
     dpdk_mempool: *mut rte_mempool,
+
+    num_buffered: usize,
+    buffered: [PacketBuf; MAX_QUEUE_DEPTH],
+
+    pktbufs: Vec<Box<[u8; PKTBUF_SIZE]>>,
 }
 
-impl Runtime for LibOSRuntime {
+impl Runtime for DPDKRuntime {
     type WaitFuture = WaitFuture<TimerRc>;
 
-    fn transmit(&self, buf: Rc<RefCell<Vec<u8>>>) {
+    fn transmit(&self, buf: impl PacketSerialize) {
         let pool = { self.inner.borrow().dpdk_mempool };
         let dpdk_port_id = { self.inner.borrow().dpdk_port_id };
         let mut pkt = unsafe { catnip_libos_alloc_pkt(pool) };
         assert!(!pkt.is_null());
 
+	let pktbuf = buf.serialize2();
+	let size = pktbuf.len();
+
         let rte_pktmbuf_headroom = 128;
         let buf_len = unsafe { (*pkt).buf_len } - rte_pktmbuf_headroom;
-        assert!(buf_len as usize >= buf.borrow().len());
+        assert!(buf_len as usize >= size);
 
         let out_ptr = unsafe { ((*pkt).buf_addr as *mut u8).offset((*pkt).data_off as isize) };
         let out_slice = unsafe { slice::from_raw_parts_mut(out_ptr, buf_len as usize) };
-        out_slice[..buf.borrow().len()].copy_from_slice(&buf.borrow()[..]);
+	out_slice[..size].copy_from_slice(&pktbuf[..]);
+	self.free_pktbuf(pktbuf);
         let num_sent = unsafe {
-            (*pkt).data_len = buf.borrow().len() as u16;
-            (*pkt).pkt_len = buf.borrow().len() as u32;
+            (*pkt).data_len = size as u16;
+            (*pkt).pkt_len = size as u32;
             (*pkt).nb_segs = 1;
             (*pkt).next = ptr::null_mut();
 
             catnip_libos_eth_tx_burst(dpdk_port_id, 0, &mut pkt as *mut _, 1)
         };
         assert_eq!(num_sent, 1);
+    }
+
+    fn receive(&self) -> Option<PacketBuf> {
+        let mut inner = self.inner.borrow_mut();
+        loop {
+            if inner.num_buffered > 0 {
+                inner.num_buffered -= 1;
+                let ix = inner.num_buffered;
+                return Some(mem::replace(&mut inner.buffered[ix], PacketBuf::empty()));
+            }
+
+            let dpdk_port = inner.dpdk_port_id;
+            let mut packets: [*mut rte_mbuf; MAX_QUEUE_DEPTH] = unsafe { mem::zeroed() };
+
+            // rte_eth_rx_burst is declared `inline` in the header.
+            let nb_rx = unsafe {
+                catnip_libos_eth_rx_burst(
+                    dpdk_port,
+                    0,
+                    packets.as_mut_ptr(),
+                    MAX_QUEUE_DEPTH as u16,
+                )
+            };
+            assert!(nb_rx as usize <= MAX_QUEUE_DEPTH);
+            if nb_rx == 0 {
+                return None;
+            }
+            // let dev = unsafe { rte_eth_devices[dpdk_port as usize] };
+            // let rx_burst = dev.rx_pkt_burst.expect("Missing RX burst function");
+            // // This only supports queue_id 0.
+            // let nb_rx = unsafe { (rx_burst)(*(*dev.data).rx_queues, todo!(), MAX_QUEUE_DEPTH as u16) };
+
+            for &packet in &packets[..nb_rx as usize] {
+                // auto * const p = rte_pktmbuf_mtod(packet, uint8_t *);
+                let p = unsafe {
+                    ((*packet).buf_addr as *const u8).offset((*packet).data_off as isize)
+                };
+
+                let data = unsafe { slice::from_raw_parts(p, (*packet).data_len as usize) };
+                let mut pktbuf = PacketBuf::new(inner.pktbufs.pop().expect("Ran out of pktbufs"));
+                pktbuf = pktbuf.trim(data.len());
+                pktbuf[..].copy_from_slice(data);
+
+                let ix = inner.num_buffered;
+                inner.buffered[ix] = pktbuf;
+                inner.num_buffered += 1;
+
+                unsafe { catnip_libos_free_pkt(packet as *const _ as *mut _) };
+            }
+        }
     }
 
     fn local_link_addr(&self) -> MacAddress {
@@ -207,5 +273,27 @@ impl Runtime for LibOSRuntime {
     {
         let mut self_ = self.inner.borrow_mut();
         self_.rng.gen()
+    }
+
+    fn spawn<F: Future<Output = ()> + 'static>(&self, future: F) -> SchedulerHandle {
+        self.scheduler
+            .insert(Operation::Background(future.boxed_local()))
+    }
+
+    fn scheduler(&self) -> &Scheduler<Operation<Self>> {
+        &self.scheduler
+    }
+
+    fn alloc_pktbuf(&self) -> PacketBuf {
+        let mut inner = self.inner.borrow_mut();
+        let buf = inner.pktbufs.pop().expect("Out of packetbufs");
+        PacketBuf::new(buf)
+    }
+
+    fn free_pktbuf(&self, buf: PacketBuf) {
+        if let Some(b) = buf.into_buf() {
+            let mut inner = self.inner.borrow_mut();
+            inner.pktbufs.push(b);
+        }
     }
 }

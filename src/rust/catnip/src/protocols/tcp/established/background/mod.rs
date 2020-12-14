@@ -10,10 +10,7 @@ use self::{
     sender::sender,
 };
 use super::state::ControlBlock;
-use crate::{
-    fail::Fail,
-    runtime::Runtime,
-};
+use crate::runtime::Runtime;
 use futures::FutureExt;
 use std::{
     future::Future,
@@ -25,7 +22,7 @@ use std::{
 // 424:  retransmitter
 // 584:  sender
 // 1408: future total
-pub type BackgroundFuture<RT> = impl Future<Output = Result<!, Fail>>;
+pub type BackgroundFuture<RT> = impl Future<Output = ()>;
 
 pub fn background<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> BackgroundFuture<RT> {
     async move {
@@ -42,10 +39,10 @@ pub fn background<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> BackgroundFuture<RT>
         futures::pin_mut!(closer);
 
         futures::select_biased! {
-            r = acknowledger => return r,
-            r = retransmitter => return r,
-            r = sender => return r,
-            r = closer => return r,
+            r = acknowledger => panic!("TODO: {:?}", r),
+            r = retransmitter => panic!("TODO: {:?}", r),
+            r = sender => panic!("TODO: {:?}", r),
+            r = closer => panic!("TODO: {:?}", r),
         }
     }
 }

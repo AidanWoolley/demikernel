@@ -35,14 +35,14 @@ use crate::{
         RTE_MAX_ETHPORTS,
         RTE_MBUF_DEFAULT_BUF_SIZE,
     },
-    runtime::LibOSRuntime,
+    runtime::DPDKRuntime,
 };
 use anyhow::{
     bail,
     format_err,
     Error,
 };
-use catnip::protocols::ethernet::MacAddress;
+use catnip::protocols::ethernet2::MacAddress;
 use std::{
     ffi::CString,
     mem::MaybeUninit,
@@ -65,7 +65,7 @@ macro_rules! expect_zero {
 pub fn initialize_dpdk(
     local_ipv4_addr: Ipv4Addr,
     eal_init_args: &[CString],
-) -> Result<LibOSRuntime, Error> {
+) -> Result<DPDKRuntime, Error> {
     let eal_init_refs = eal_init_args
         .iter()
         .map(|s| s.as_ptr() as *mut u8)
@@ -126,7 +126,7 @@ pub fn initialize_dpdk(
         Err(format_err!("Invalid mac address"))?;
     }
 
-    Ok(LibOSRuntime::new(
+    Ok(DPDKRuntime::new(
         local_link_addr,
         local_ipv4_addr,
         port_id,
@@ -172,6 +172,7 @@ fn initialize_dpdk_port(port_id: u16, mbuf_pool: *mut rte_mempool) -> Result<(),
     tx_conf.tx_thresh.pthresh = tx_pthresh;
     tx_conf.tx_thresh.hthresh = tx_hthresh;
     tx_conf.tx_thresh.wthresh = tx_wthresh;
+    tx_conf.tx_free_thresh = 32;
 
     unsafe {
         expect_zero!(rte_eth_dev_configure(

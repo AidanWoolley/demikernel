@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
-
-use super::segment::{
+use crate::protocols::tcp::constants::{
     DEFAULT_MSS,
     MAX_MSS,
     MIN_MSS,

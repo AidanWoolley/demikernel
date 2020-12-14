@@ -2,25 +2,20 @@ mod background;
 pub mod state;
 
 use self::{
-    background::{
-        background,
-        BackgroundFuture,
-    },
+    background::background,
     state::ControlBlock,
 };
 use crate::{
     fail::Fail,
     protocols::{
         ipv4,
-        tcp::segment::TcpSegment,
+        tcp::segment::TcpHeader,
     },
     runtime::Runtime,
+    scheduler::SchedulerHandle,
+    sync::Bytes,
 };
-use bytes::Bytes;
-use pin_project::pin_project;
 use std::{
-    future::Future,
-    pin::Pin,
     rc::Rc,
     task::{
         Context,
@@ -29,24 +24,25 @@ use std::{
     time::Duration,
 };
 
-#[pin_project]
 pub struct EstablishedSocket<RT: Runtime> {
     pub cb: Rc<ControlBlock<RT>>,
-    #[pin]
-    background_work: BackgroundFuture<RT>,
+    #[allow(unused)]
+    background_work: SchedulerHandle,
 }
 
 impl<RT: Runtime> EstablishedSocket<RT> {
     pub fn new(cb: ControlBlock<RT>) -> Self {
         let cb = Rc::new(cb);
+        let future = background(cb.clone());
+        let handle = cb.rt.spawn(future);
         Self {
             cb: cb.clone(),
-            background_work: background(cb),
+            background_work: handle,
         }
     }
 
-    pub fn receive_segment(&self, segment: TcpSegment) {
-        self.cb.receive_segment(segment)
+    pub fn receive(&self, header: &TcpHeader, data: Bytes) {
+        self.cb.receive(header, data)
     }
 
     pub fn send(&self, buf: Bytes) -> Result<(), Fail> {
@@ -59,6 +55,10 @@ impl<RT: Runtime> EstablishedSocket<RT> {
 
     pub fn recv(&self) -> Result<Option<Bytes>, Fail> {
         self.cb.receiver.recv()
+    }
+
+    pub fn poll_recv(&self, ctx: &mut Context) -> Poll<Result<Bytes, Fail>> {
+        self.cb.receiver.poll_recv(ctx)
     }
 
     pub fn close(&self) -> Result<(), Fail> {
@@ -75,18 +75,5 @@ impl<RT: Runtime> EstablishedSocket<RT> {
 
     pub fn endpoints(&self) -> (ipv4::Endpoint, ipv4::Endpoint) {
         (self.cb.local.clone(), self.cb.remote.clone())
-    }
-}
-
-impl<RT: Runtime> Future for EstablishedSocket<RT> {
-    type Output = !;
-
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<!> {
-        let self_ = self.project();
-        assert!(
-            Future::poll(self_.background_work, ctx).is_pending(),
-            "TODO: Connection close"
-        );
-        Poll::Pending
     }
 }

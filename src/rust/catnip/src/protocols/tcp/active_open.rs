@@ -10,21 +10,33 @@ use crate::{
     fail::Fail,
     protocols::{
         arp,
+        ethernet2::frame::{
+            EtherType2,
+            Ethernet2Header,
+        },
         ipv4,
+        ipv4::datagram::{
+            Ipv4Header,
+            Ipv4Protocol2,
+        },
         tcp::{
-            segment::TcpSegment,
+            segment::{
+                TcpHeader,
+                TcpOptions2,
+                TcpSegment,
+            },
             SeqNumber,
         },
     },
     runtime::Runtime,
+    scheduler::SchedulerHandle,
+    sync::Bytes,
 };
-use pin_project::pin_project;
 use std::{
     cell::RefCell,
     convert::TryInto,
     future::Future,
     num::Wrapping,
-    pin::Pin,
     rc::Rc,
     task::{
         Context,
@@ -34,9 +46,11 @@ use std::{
     time::Duration,
 };
 
-type BackgroundFuture<RT: Runtime> = impl Future<Output = Result<ControlBlock<RT>, Fail>>;
+struct ConnectResult<RT: Runtime> {
+    waker: Option<Waker>,
+    result: Option<Result<ControlBlock<RT>, Fail>>,
+}
 
-#[pin_project]
 pub struct ActiveOpenSocket<RT: Runtime> {
     local_isn: SeqNumber,
 
@@ -46,11 +60,9 @@ pub struct ActiveOpenSocket<RT: Runtime> {
     rt: RT,
     arp: arp::Peer<RT>,
 
-    #[pin]
-    future: BackgroundFuture<RT>,
-
-    waker: Option<Waker>,
-    result: Option<Result<ControlBlock<RT>, Fail>>,
+    #[allow(unused)]
+    handle: SchedulerHandle,
+    result: Rc<RefCell<ConnectResult<RT>>>,
 }
 
 impl<RT: Runtime> ActiveOpenSocket<RT> {
@@ -61,13 +73,22 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
         rt: RT,
         arp: arp::Peer<RT>,
     ) -> Self {
+        let result = ConnectResult {
+            waker: None,
+            result: None,
+        };
+        let result = Rc::new(RefCell::new(result));
+
         let future = Self::background(
             local_isn,
             local.clone(),
             remote.clone(),
             rt.clone(),
             arp.clone(),
+            result.clone(),
         );
+        let handle = rt.spawn(future);
+
         // TODO: Add fast path here when remote is already in the ARP cache (and subtract one retry).
         Self {
             local_isn,
@@ -76,86 +97,96 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
             rt,
             arp,
 
-            future,
-            waker: None,
-            result: None,
+            handle,
+            result,
         }
     }
 
-    pub fn poll_result(
-        self: Pin<&mut Self>,
-        context: &mut Context,
-    ) -> Poll<Result<ControlBlock<RT>, Fail>> {
-        let self_ = self.project();
-        match self_.result.take() {
+    pub fn poll_result(&mut self, context: &mut Context) -> Poll<Result<ControlBlock<RT>, Fail>> {
+        let mut r = self.result.borrow_mut();
+        match r.result.take() {
             None => {
-                self_.waker.replace(context.waker().clone());
+                r.waker.replace(context.waker().clone());
                 Poll::Pending
             },
             Some(r) => Poll::Ready(r),
         }
     }
 
-    pub fn receive_segment(self: Pin<&mut Self>, segment: TcpSegment) {
-        let self_ = self.project();
+    fn set_result(&mut self, result: Result<ControlBlock<RT>, Fail>) {
+        let mut r = self.result.borrow_mut();
+        r.waker.take().map(|w| w.wake());
+        r.result.replace(result);
+    }
 
-        if segment.rst {
-            self_.waker.take().map(|w| w.wake());
-            self_.result.replace(Err(Fail::ConnectionRefused {}));
+    pub fn receive(&mut self, header: &TcpHeader) {
+        if header.rst {
+            self.set_result(Err(Fail::ConnectionRefused {}));
             return;
         }
-        let expected_seq = *self_.local_isn + Wrapping(1);
-        if segment.ack && segment.syn && segment.ack_num == expected_seq {
-            // Acknowledge the SYN+ACK segment.
-            let remote_link_addr = match self_.arp.try_query(self_.remote.address()) {
-                Some(r) => r,
-                None => panic!("TODO: Clean up ARP query control flow"),
-            };
-            let remote_seq_num = segment.seq_num + Wrapping(1);
-            let segment_buf = TcpSegment::default()
-                .src_ipv4_addr(self_.local.address())
-                .src_port(self_.local.port())
-                .src_link_addr(self_.rt.local_link_addr())
-                .dest_ipv4_addr(self_.remote.address())
-                .dest_port(self_.remote.port())
-                .dest_link_addr(remote_link_addr)
-                .ack(remote_seq_num)
-                .encode();
+        let expected_seq = self.local_isn + Wrapping(1);
 
-            self_.rt.transmit(Rc::new(RefCell::new(segment_buf)));
+        // Bail if we didn't receive a SYN+ACK packet with the right sequence number.
+        if !(header.ack && header.syn && header.ack_num == expected_seq) {
+            return;
+        }
 
-            let window_scale = segment.window_scale.unwrap_or(1);
-            let window_size = segment
-                .window_size
-                .checked_shl(window_scale as u32)
-                .expect("TODO: Window size overflow")
-                .try_into()
-                .expect("TODO: Window size overflow");
-            let mss = match segment.mss {
-                Some(s) => s,
-                None => {
-                    warn!("Falling back to MSS = {}", FALLBACK_MSS);
-                    FALLBACK_MSS
+        // Acknowledge the SYN+ACK segment.
+        let remote_link_addr = match self.arp.try_query(self.remote.address()) {
+            Some(r) => r,
+            None => panic!("TODO: Clean up ARP query control flow"),
+        };
+        let remote_seq_num = header.seq_num + Wrapping(1);
+        let mut tcp_hdr = TcpHeader::new(self.local.port, self.remote.port);
+        tcp_hdr.ack = true;
+        tcp_hdr.ack_num = remote_seq_num;
+
+        let segment = TcpSegment {
+            ethernet2_hdr: Ethernet2Header {
+                dst_addr: remote_link_addr,
+                src_addr: self.rt.local_link_addr(),
+                ether_type: EtherType2::Ipv4,
+            },
+            ipv4_hdr: Ipv4Header::new(self.local.addr, self.remote.addr, Ipv4Protocol2::Tcp),
+            tcp_hdr,
+            data: Bytes::empty(),
+        };
+        self.rt.transmit(segment);
+
+        let mut window_scale = 1;
+        let mut mss = FALLBACK_MSS;
+        for option in header.iter_options() {
+            match option {
+                TcpOptions2::WindowScale(w) => {
+                    window_scale = *w;
                 },
-            };
-            let sender = Sender::new(expected_seq, window_size, window_scale, mss);
-            let receiver = Receiver::new(
-                remote_seq_num,
-                self_.rt.tcp_options().receive_window_size as u32,
-            );
-            let cb = ControlBlock {
-                local: self_.local.clone(),
-                remote: self_.remote.clone(),
-                rt: self_.rt.clone(),
-                arp: self_.arp.clone(),
-                sender,
-                receiver,
-            };
-            self_.waker.take().map(|w| w.wake());
-            self_.result.replace(Ok(cb));
-            return;
+                TcpOptions2::MaximumSegmentSize(m) => {
+                    mss = *m as usize;
+                },
+                _ => continue,
+            }
         }
-        // Otherwise, just drop the packet.
+        let window_size = header
+            .window_size
+            .checked_shl(window_scale as u32)
+            .expect("TODO: Window size overflow")
+            .try_into()
+            .expect("TODO: Window size overflow");
+
+        let sender = Sender::new(expected_seq, window_size, window_scale, mss);
+        let receiver = Receiver::new(
+            remote_seq_num,
+            self.rt.tcp_options().receive_window_size as u32,
+        );
+        let cb = ControlBlock {
+            local: self.local.clone(),
+            remote: self.remote.clone(),
+            rt: self.rt.clone(),
+            arp: self.arp.clone(),
+            sender,
+            receiver,
+        };
+        self.set_result(Ok(cb));
     }
 
     fn background(
@@ -164,7 +195,8 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
         remote: ipv4::Endpoint,
         rt: RT,
         arp: arp::Peer<RT>,
-    ) -> BackgroundFuture<RT> {
+        result: Rc<RefCell<ConnectResult<RT>>>,
+    ) -> impl Future<Output = ()> {
         let handshake_retries = 3usize;
         let handshake_timeout = Duration::from_secs(5);
         let max_window_size = 1024;
@@ -178,41 +210,31 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
                         continue;
                     },
                 };
-                let segment_buf = TcpSegment::default()
-                    .src_ipv4_addr(local.address())
-                    .src_port(local.port())
-                    .src_link_addr(rt.local_link_addr())
-                    .dest_ipv4_addr(remote.address())
-                    .dest_port(remote.port())
-                    .dest_link_addr(remote_link_addr)
-                    .seq_num(local_isn)
-                    .window_size(max_window_size)
-                    .mss(rt.tcp_options().advertised_mss)
-                    .syn()
-                    .encode();
-                rt.transmit(Rc::new(RefCell::new(segment_buf)));
 
+                let mut tcp_hdr = TcpHeader::new(local.port, remote.port);
+                tcp_hdr.syn = true;
+                tcp_hdr.seq_num = local_isn;
+                tcp_hdr.window_size = max_window_size;
+
+                let mss = rt.tcp_options().advertised_mss as u16;
+                tcp_hdr.push_option(TcpOptions2::MaximumSegmentSize(mss));
+
+                let segment = TcpSegment {
+                    ethernet2_hdr: Ethernet2Header {
+                        dst_addr: remote_link_addr,
+                        src_addr: rt.local_link_addr(),
+                        ether_type: EtherType2::Ipv4,
+                    },
+                    ipv4_hdr: Ipv4Header::new(local.addr, remote.addr, Ipv4Protocol2::Tcp),
+                    tcp_hdr,
+                    data: Bytes::empty(),
+                };
+                rt.transmit(segment);
                 rt.wait(handshake_timeout).await;
             }
-            Err(Fail::Timeout {})
+            let mut r = result.borrow_mut();
+            r.waker.take().map(|w| w.wake());
+            r.result.replace(Err(Fail::Timeout {}));
         }
-    }
-}
-
-impl<RT: Runtime> Future for ActiveOpenSocket<RT> {
-    type Output = !;
-
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<!> {
-        let self_ = self.project();
-        if self_.result.is_some() {
-            return Poll::Pending;
-        }
-        let r = match Future::poll(self_.future, ctx) {
-            Poll::Ready(r) => r,
-            Poll::Pending => return Poll::Pending,
-        };
-        self_.waker.take().map(|w| w.wake());
-        self_.result.replace(r);
-        Poll::Pending
     }
 }

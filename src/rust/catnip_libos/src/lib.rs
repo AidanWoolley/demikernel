@@ -1,29 +1,20 @@
 #![allow(non_camel_case_types, unused)]
+#![feature(maybe_uninit_uninit_array)]
 #![feature(try_blocks)]
+#![feature(maybe_uninit, new_uninit)]
 
-mod bindings;
-mod dpdk;
-mod qtoken;
-mod runtime;
-
-use self::qtoken::{
-    QToken,
-    QTokenManager,
-    UserOperation,
-    UserOperationResult,
-};
-use anyhow::{
-    format_err,
-    Error,
-};
-use bytes::BytesMut;
 use catnip::{
-    engine::Engine,
+    file_table::FileDescriptor,
+    interop::{
+        dmtr_qresult_t,
+        dmtr_qtoken_t,
+        dmtr_sgarray_t,
+    },
+    libos::LibOS,
     logging,
     protocols::{
         ip,
         ipv4,
-        tcp::peer::SocketDescriptor,
     },
     runtime::Runtime,
 };
@@ -31,7 +22,12 @@ use clap::{
     App,
     Arg,
 };
-use futures::task::noop_waker_ref;
+use libc::{
+    c_char,
+    c_int,
+    sockaddr,
+    socklen_t,
+};
 use std::{
     cell::RefCell,
     convert::TryFrom,
@@ -43,149 +39,27 @@ use std::{
     io::Read,
     mem,
     net::Ipv4Addr,
-    ptr,
     slice,
-    task::{
-        Context,
-        Poll,
-    },
-    time::Instant,
 };
 use yaml_rust::{
     Yaml,
     YamlLoader,
 };
 
-// TODO: Investigate using bindgen to avoid the copy paste here.
-use libc::{
-    c_char,
-    c_int,
-    c_void,
-    sockaddr,
-    sockaddr_in,
-    socklen_t,
+mod bindings;
+mod dpdk;
+mod runtime;
+
+use crate::runtime::DPDKRuntime;
+use anyhow::{
+    format_err,
+    Error,
 };
 
-struct LibOS {
-    catnip: Engine<crate::runtime::LibOSRuntime>,
-    qtokens: QTokenManager<crate::runtime::LibOSRuntime>,
-    runtime: crate::runtime::LibOSRuntime,
-}
-
-pub type dmtr_qtoken_t = u64;
-
-#[derive(Copy, Clone)]
-pub struct dmtr_sgaseg_t {
-    sgaseg_buf: *mut c_void,
-    sgaseg_len: u32,
-}
-
-pub const DMTR_SGARRAY_MAXSIZE: usize = 1;
-
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct dmtr_sgarray_t {
-    sga_buf: *mut c_void,
-    sga_numsegs: u32,
-    sga_segs: [dmtr_sgaseg_t; DMTR_SGARRAY_MAXSIZE],
-    sga_addr: sockaddr_in,
-}
-
-#[repr(C)]
-pub enum dmtr_opcode_t {
-    DMTR_OPC_INVALID = 0,
-    DMTR_OPC_PUSH,
-    DMTR_OPC_POP,
-    DMTR_OPC_ACCEPT,
-    DMTR_OPC_CONNECT,
-}
-
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct dmtr_accept_result_t {
-    qd: c_int,
-    addr: sockaddr_in,
-}
-
-#[repr(C)]
-union dmtr_qr_value_t {
-    sga: dmtr_sgarray_t,
-    ares: dmtr_accept_result_t,
-}
-
-#[repr(C)]
-pub struct dmtr_qresult_t {
-    qr_opcode: dmtr_opcode_t,
-    qr_qd: c_int,
-    qr_qt: dmtr_qtoken_t,
-    qr_value: dmtr_qr_value_t,
-}
-
-impl dmtr_qresult_t {
-    fn pack(result: UserOperationResult, qd: SocketDescriptor, qt: QToken) -> Self {
-        match result {
-            UserOperationResult::Connect => Self {
-                qr_opcode: dmtr_opcode_t::DMTR_OPC_CONNECT,
-                qr_qd: qd as c_int,
-                qr_qt: qt,
-                qr_value: unsafe { mem::zeroed() },
-            },
-            UserOperationResult::Accept(new_qd) => {
-                let sin = unsafe { mem::zeroed() };
-                let qr_value = dmtr_qr_value_t {
-                    ares: dmtr_accept_result_t {
-                        qd: new_qd as c_int,
-                        addr: sin,
-                    },
-                };
-                Self {
-                    qr_opcode: dmtr_opcode_t::DMTR_OPC_ACCEPT,
-                    qr_qd: qd as c_int,
-                    qr_qt: qt,
-                    qr_value,
-                }
-            },
-            UserOperationResult::Push => Self {
-                qr_opcode: dmtr_opcode_t::DMTR_OPC_CONNECT,
-                qr_qd: qd as c_int,
-                qr_qt: qt,
-                qr_value: unsafe { mem::zeroed() },
-            },
-            UserOperationResult::Pop(bytes) => {
-                let buf: Box<[u8]> = bytes[..].into();
-                let ptr = Box::into_raw(buf);
-                let sgaseg = dmtr_sgaseg_t {
-                    sgaseg_buf: ptr as *mut _,
-                    sgaseg_len: bytes.len() as u32,
-                };
-                let sga = dmtr_sgarray_t {
-                    sga_buf: ptr::null_mut(),
-                    sga_numsegs: 1,
-                    sga_segs: [sgaseg],
-                    sga_addr: unsafe { mem::zeroed() },
-                };
-                let qr_value = dmtr_qr_value_t { sga };
-                Self {
-                    qr_opcode: dmtr_opcode_t::DMTR_OPC_POP,
-                    qr_qd: qd as c_int,
-                    qr_qt: qt,
-                    qr_value,
-                }
-            },
-            UserOperationResult::Failed(e) => {
-                panic!("Unhandled error: {:?}", e);
-            },
-            UserOperationResult::InvalidToken => {
-                unimplemented!();
-            },
-        }
-    }
-}
-
 thread_local! {
-    static LIBOS: RefCell<Option<LibOS>> = RefCell::new(None);
+    static LIBOS: RefCell<Option<LibOS<DPDKRuntime>>> = RefCell::new(None);
 }
-fn with_libos<T>(f: impl FnOnce(&mut LibOS) -> T) -> T {
+fn with_libos<T>(f: impl FnOnce(&mut LibOS<DPDKRuntime>) -> T) -> T {
     LIBOS.with(|l| {
         let mut tls_libos = l.borrow_mut();
         f(tls_libos.as_mut().expect("Uninitialized engine"))
@@ -271,11 +145,7 @@ pub extern "C" fn dmtr_init(argc: c_int, argv: *mut *mut c_char) -> c_int {
 
         let runtime = self::dpdk::initialize_dpdk(local_ipv4_addr, &eal_init_args)?;
         logging::initialize();
-        LibOS {
-            catnip: Engine::new(runtime.clone())?,
-            qtokens: QTokenManager::new(),
-            runtime,
-        }
+        LibOS::new(runtime)?
     };
     let libos = match r {
         Ok(libos) => libos,
@@ -301,14 +171,15 @@ pub extern "C" fn dmtr_socket(
     socket_type: c_int,
     protocol: c_int,
 ) -> c_int {
-    if (domain, socket_type, protocol) != (libc::AF_INET, libc::SOCK_STREAM, 0) {
-        eprintln!("Invalid socket: {:?}", (domain, socket_type, protocol));
-        return libc::EINVAL;
-    }
-    with_libos(|libos| {
-        let fd = libos.catnip.tcp_socket() as c_int;
-        unsafe { *qd_out = fd };
-        0
+    with_libos(|libos| match libos.socket(domain, socket_type, protocol) {
+        Ok(fd) => {
+            unsafe { *qd_out = fd as c_int };
+            0
+        },
+        Err(e) => {
+            eprintln!("dmtr_socket failed: {:?}", e);
+            e.errno()
+        },
     })
 }
 
@@ -326,13 +197,13 @@ pub extern "C" fn dmtr_bind(qd: c_int, saddr: *const sockaddr, size: socklen_t) 
 
     with_libos(|libos| {
         if addr.is_unspecified() {
-            addr = libos.runtime.local_ipv4_addr();
+            addr = libos.rt().local_ipv4_addr();
         }
         let endpoint = ipv4::Endpoint::new(addr, port);
-        match libos.catnip.tcp_bind(qd as SocketDescriptor, endpoint) {
+        match libos.bind(qd as FileDescriptor, endpoint) {
             Ok(..) => 0,
             Err(e) => {
-                eprintln!("bind failed: {:?}", e);
+                eprintln!("dmtr_bind failed: {:?}", e);
                 e.errno()
             },
         }
@@ -341,27 +212,21 @@ pub extern "C" fn dmtr_bind(qd: c_int, saddr: *const sockaddr, size: socklen_t) 
 
 #[no_mangle]
 pub extern "C" fn dmtr_listen(fd: c_int, backlog: c_int) -> c_int {
-    with_libos(|libos| {
-        match libos
-            .catnip
-            .tcp_listen(fd as SocketDescriptor, backlog as usize)
-        {
+    with_libos(
+        |libos| match libos.listen(fd as FileDescriptor, backlog as usize) {
             Ok(..) => 0,
             Err(e) => {
                 eprintln!("listen failed: {:?}", e);
                 e.errno()
             },
-        }
-    })
+        },
+    )
 }
 
 #[no_mangle]
 pub extern "C" fn dmtr_accept(qtok_out: *mut dmtr_qtoken_t, sockqd: c_int) -> c_int {
     with_libos(|libos| {
-        let future =
-            UserOperation::Accept(libos.catnip.tcp_accept_async(sockqd as SocketDescriptor));
-        let qtoken = libos.qtokens.insert(future);
-        unsafe { *qtok_out = qtoken };
+        unsafe { *qtok_out = libos.accept(sockqd as FileDescriptor) };
         0
     })
 }
@@ -385,25 +250,20 @@ pub extern "C" fn dmtr_connect(
     let endpoint = ipv4::Endpoint::new(addr, port);
 
     with_libos(|libos| {
-        let future =
-            UserOperation::Connect(libos.catnip.tcp_connect(qd as SocketDescriptor, endpoint));
-        let qtoken = libos.qtokens.insert(future);
-        unsafe { *qtok_out = qtoken };
+        unsafe { *qtok_out = libos.connect(qd as FileDescriptor, endpoint) };
         0
     })
 }
 
 #[no_mangle]
 pub extern "C" fn dmtr_close(qd: c_int) -> c_int {
-    with_libos(
-        |libos| match libos.catnip.tcp_close(qd as SocketDescriptor) {
-            Ok(..) => 0,
-            Err(e) => {
-                eprintln!("listen failed: {:?}", e);
-                e.errno()
-            },
+    with_libos(|libos| match libos.close(qd as FileDescriptor) {
+        Ok(..) => 0,
+        Err(e) => {
+            eprintln!("dmtr_close failed: {:?}", e);
+            e.errno()
         },
-    )
+    })
 }
 
 #[no_mangle]
@@ -416,90 +276,44 @@ pub extern "C" fn dmtr_push(
         return libc::EINVAL;
     }
     let sga = unsafe { *sga };
-    if !sga.sga_buf.is_null() {
-        eprintln!("Non-NULL sga->sga_buf");
-        return libc::EINVAL;
-    }
-    let mut len = 0;
-    for i in 0..sga.sga_numsegs as usize {
-        len += sga.sga_segs[i].sgaseg_len;
-    }
-    let mut buf = BytesMut::with_capacity(len as usize);
-    for i in 0..sga.sga_numsegs as usize {
-        let seg = &sga.sga_segs[i];
-        let seg_slice =
-            unsafe { slice::from_raw_parts(seg.sgaseg_buf as *mut u8, seg.sgaseg_len as usize) };
-        buf.extend_from_slice(seg_slice);
-    }
-    let buf = buf.freeze();
     with_libos(|libos| {
-        let future = UserOperation::Push(libos.catnip.tcp_push_async(qd as SocketDescriptor, buf));
-        let qtoken = libos.qtokens.insert(future);
-        unsafe { *qtok_out = qtoken };
+        unsafe { *qtok_out = libos.push(qd as FileDescriptor, sga) };
         0
     })
 }
 
-// TODO:
-// 1) Finish pop/poll/drop/wait/wait_any
-// 2) Hook up DPDK to runtime
-// 3) Write main loop that polls incoming packets, user tasks, background tasks
-// 4) Fix up dmtr_sgafree stuff
-
 #[no_mangle]
 pub extern "C" fn dmtr_pop(qtok_out: *mut dmtr_qtoken_t, qd: c_int) -> c_int {
     with_libos(|libos| {
-        let future = UserOperation::Pop(libos.catnip.tcp_pop_async(qd as SocketDescriptor));
-        let qtoken = libos.qtokens.insert(future);
-        unsafe { *qtok_out = qtoken };
+        unsafe { *qtok_out = libos.pop(qd as FileDescriptor) };
         0
     })
 }
 
 #[no_mangle]
 pub extern "C" fn dmtr_poll(qr_out: *mut dmtr_qresult_t, qt: dmtr_qtoken_t) -> c_int {
-    with_libos(|libos| {
-        let mut ctx = Context::from_waker(noop_waker_ref());
-        let qt = qt as QToken;
-        match libos.qtokens.poll(qt, &mut ctx) {
-            Poll::Ready((qd, r)) => {
-                unsafe { *qr_out = dmtr_qresult_t::pack(r, qd, qt) };
-                0
-            },
-            Poll::Pending => libc::EAGAIN,
-        }
+    with_libos(|libos| match libos.poll(qt) {
+        None => libc::EAGAIN,
+        Some(r) => {
+            unsafe { *qr_out = r };
+            0
+        },
     })
 }
 
 #[no_mangle]
 pub extern "C" fn dmtr_drop(qt: dmtr_qtoken_t) -> c_int {
     with_libos(|libos| {
-        if libos.qtokens.remove(qt as QToken) {
-            0
-        } else {
-            libc::EINVAL
-        }
+        libos.drop_qtoken(qt);
+        0
     })
 }
 
 #[no_mangle]
 pub extern "C" fn dmtr_wait(qr_out: *mut dmtr_qresult_t, qt: dmtr_qtoken_t) -> c_int {
-    let mut ctx = Context::from_waker(noop_waker_ref());
-    with_libos(|libos| loop {
-        match libos.qtokens.poll(qt, &mut ctx) {
-            Poll::Ready((qd, r)) => {
-                unsafe { *qr_out = dmtr_qresult_t::pack(r, qd, qt) };
-                return 0;
-            },
-            Poll::Pending => (),
-        }
-        let catnip = &mut libos.catnip;
-        libos.runtime.receive(|p| {
-            if let Err(e) = catnip.receive(p) {
-                eprintln!("Dropped packet: {:?}", e);
-            }
-        });
-        libos.catnip.advance_clock(Instant::now());
+    with_libos(|libos| {
+        unsafe { *qr_out = libos.wait(qt) };
+        0
     })
 }
 
@@ -511,29 +325,24 @@ pub extern "C" fn dmtr_wait_any(
     num_qts: c_int,
 ) -> c_int {
     let qts = unsafe { slice::from_raw_parts(qts, num_qts as usize) };
-    let mut ctx = Context::from_waker(noop_waker_ref());
-
-    with_libos(|libos| loop {
-        for (i, &qt) in qts.iter().enumerate() {
-            match libos.qtokens.poll(qt, &mut ctx) {
-                Poll::Ready((qd, r)) => {
-                    unsafe {
-                        *qr_out = dmtr_qresult_t::pack(r, qd, qt);
-                        *ready_offset = i as c_int;
-                    };
-                    return 0;
-                },
-                Poll::Pending => (),
-            }
+    with_libos(|libos| {
+        let (ix, qr) = libos.wait_any(qts);
+        unsafe {
+            *qr_out = qr;
+            *ready_offset = ix as c_int;
         }
-        let catnip = &mut libos.catnip;
-        libos.runtime.receive(|p| {
-            if let Err(e) = catnip.receive(p) {
-                eprintln!("Dropped packet: {:?}", e);
-            }
-        });
-        libos.catnip.advance_clock(Instant::now());
+        0
     })
+}
+
+#[no_mangle]
+pub extern "C" fn dmtr_pktbuf_alloc() -> dmtr_sgarray_t {
+    with_libos(|libos| libos.rt().alloc_pktbuf().into())
+}
+
+#[no_mangle]
+pub extern "C" fn dmtr_pktbuf_free(a: dmtr_sgarray_t) {
+    with_libos(move |libos| libos.rt().free_pktbuf(a.into()))
 }
 
 #[no_mangle]
