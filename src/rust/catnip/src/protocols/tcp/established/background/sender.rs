@@ -89,6 +89,9 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
             }
         }
 
+        // TODO: Congestion control
+        // TODO: Is there enough space in cwnd?
+
         // TODO: Nagle's algorithm
         // TODO: Silly window syndrome
         let remote_link_addr = cb.arp.query(cb.remote.address()).await?;
