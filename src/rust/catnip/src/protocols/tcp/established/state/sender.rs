@@ -170,6 +170,7 @@ impl Sender {
             });
         }
         if bytes_acknowledged.0 == 0 {
+            // TODO: Congestion control
             // TODO: Handle fast retransmit here.
             return Ok(());
         }
@@ -203,6 +204,9 @@ impl Sender {
                 break;
             }
         }
+        // TODO: Congestion control
+        // TODO: Modify cwnd for slow start, congestion avoidance or fast recovery
+
         self.base_seq_no.modify(|b| b + bytes_acknowledged);
 
         Ok(())
