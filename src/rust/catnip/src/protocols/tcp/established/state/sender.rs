@@ -34,6 +34,64 @@ pub enum SenderState {
     Reset,
 }
 
+pub struct CongestionControlState<AlgParams> {
+    pub cwnd: WatchedValue<u32>,
+    pub ssthresh: WatchedValue<u32>,
+    // flightSize = sent_seq_no - base_seq_no!
+    // probably needn't be this big
+    pub repeat_ack_count: WatchedValue<u32>,
+    pub params: AlgParams
+}
+
+impl<AlgParams: fmt::Debug> fmt::Debug for CongestionControlState<AlgParams> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("CongestionControlState")
+            .field("cwnd", &self.cwnd)
+            .field("ssthresh", &self.ssthresh)
+            .field("params", &self.params)
+            .finish()
+    }
+}
+
+impl<AlgParams> CongestionControlState<AlgParams> {
+    pub fn new(mss: usize, params: AlgParams) -> Self {
+        let mss: u32 = mss.try_into().unwrap();
+        let initial_cwnd = match mss {
+            0..=1095 => 4 * mss,
+            1096..=2190 => 3 * mss,
+            _ => 2 * mss
+        };
+        Self {
+            cwnd: WatchedValue::new(initial_cwnd),
+            ssthresh: WatchedValue::new(u32::MAX),
+            repeat_ack_count: WatchedValue::new(0),
+            params,
+        }
+    }
+}
+
+pub struct CubicParams {
+    pub C: f32,
+    pub K: f32,
+    pub beta_cubic: f32,
+    pub recover: WatchedValue<u32>,
+    pub W_max: usize,
+    pub W_last_max: usize,
+}
+
+impl CubicParams {
+    pub fn new(seq_no: SeqNumber) -> Self {
+        Self {
+            C: 0.4,
+            K: 0.0,
+            beta_cubic: 0.7,
+            recover: WatchedValue::new(seq_no.0),
+            W_max: 0,
+            W_last_max: 0,
+        }
+    }
+}
+
 pub struct Sender {
     pub state: WatchedValue<SenderState>,
 
@@ -60,6 +118,8 @@ pub struct Sender {
 
     pub retransmit_deadline: WatchedValue<Option<Instant>>,
     pub rto: RefCell<RtoCalculator>,
+
+    congestion_ctrl_state: CongestionControlState<CubicParams>,
 }
 
 impl fmt::Debug for Sender {
@@ -94,6 +154,8 @@ impl Sender {
 
             retransmit_deadline: WatchedValue::new(None),
             rto: RefCell::new(RtoCalculator::new()),
+
+            congestion_ctrl_state: CongestionControlState::<CubicParams>::new(mss, CubicParams::new(seq_no))
         }
     }
 
