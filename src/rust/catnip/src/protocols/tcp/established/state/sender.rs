@@ -172,10 +172,13 @@ impl Sender {
         let win_sz = self.window_size.get();
         let base_seq = self.base_seq_no.get();
         let sent_seq = self.sent_seq_no.get();
+        let cwnd = self.congestion_ctrl_state.cwnd.get();
         let Wrapping(sent_data) = sent_seq - base_seq;
 
         // Fast path: Try to send the data immediately.
-        if win_sz > 0 && win_sz >= sent_data + buf_len {
+        // TODO: Congestion control
+        // TODO: Edge case when cwnd wraps before sequence number: might we get stuck?!
+        if win_sz > 0 && win_sz >= sent_data + buf_len && cwnd >= sent_data + buf_len {
             if let Some(remote_link_addr) = cb.arp.try_query(cb.remote.address()) {
                 let mut header = cb.tcp_header();
                 header.seq_num = sent_seq;
