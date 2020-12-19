@@ -15,6 +15,7 @@ use std::{
         Duration,
         Instant,
     },
+    cmp,
 };
 
 pub struct UnackedSegment {
@@ -234,10 +235,26 @@ impl Sender {
                 details: "ACK is outside of send window",
             });
         }
+
         if bytes_acknowledged.0 == 0 {
+            // Duplicate ACK
             // TODO: Congestion control
             // TODO: Handle fast retransmit here.
+            self.congestion_ctrl_state.repeat_ack_count.modify(|s| s + 1);
+            let repeat_ack_count = self.congestion_ctrl_state.repeat_ack_count.get();
+            let mss: u32 = self.mss.try_into().unwrap();
+            if repeat_ack_count == 3 {
+                let flight_size = (sent_seq_no - base_seq_no).0;
+                self.congestion_ctrl_state.ssthresh.modify(|s| cmp::max(flight_size / 2, mss * 2));
+                // TODO: Congestion control
+                // TODO: Retransmit lost packet
+                self.congestion_ctrl_state.cwnd.modify(|s| self.congestion_ctrl_state.ssthresh.get() + 3 * mss);
+            } else if repeat_ack_count > 3 {
+                self.congestion_ctrl_state.cwnd.modify(|s| s + mss);
+            }
             return Ok(());
+        } else {
+            self.congestion_ctrl_state.cwnd.modify(|_| self.congestion_ctrl_state.ssthresh.get())
         }
 
         if ack_seq_no == sent_seq_no {
