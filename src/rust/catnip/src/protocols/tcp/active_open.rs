@@ -5,6 +5,7 @@ use super::{
         sender::Sender,
         ControlBlock,
     },
+    options::TcpCongestionControlType,
 };
 use crate::{
     fail::Fail,
@@ -173,7 +174,7 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
             .try_into()
             .expect("TODO: Window size overflow");
 
-        let sender = Sender::new(expected_seq, window_size, window_scale, mss);
+        let sender = Sender::new(expected_seq, window_size, window_scale, mss, TcpCongestionControlType::Cubic);
         let receiver = Receiver::new(
             remote_seq_num,
             self.rt.tcp_options().receive_window_size as u32,

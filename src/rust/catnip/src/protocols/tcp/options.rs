@@ -8,8 +8,15 @@ use crate::protocols::tcp::constants::{
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
+pub enum TcpCongestionControlType {
+    None,
+    Cubic,
+}
+
+#[derive(Clone, Debug)]
 pub struct TcpOptions {
     pub advertised_mss: usize,
+    pub congestion_ctrl_type: TcpCongestionControlType,
     pub handshake_retries: usize,
     pub handshake_timeout: Duration,
     pub receive_window_size: usize,
@@ -21,6 +28,7 @@ impl Default for TcpOptions {
     fn default() -> Self {
         TcpOptions {
             advertised_mss: DEFAULT_MSS,
+            congestion_ctrl_type: TcpCongestionControlType::Cubic,
             handshake_retries: 5,
             handshake_timeout: Duration::from_secs(3),
             receive_window_size: 0xffff,
@@ -35,6 +43,11 @@ impl TcpOptions {
         assert!(value >= MIN_MSS);
         assert!(value <= MAX_MSS);
         self.advertised_mss = value;
+        self
+    }
+
+    pub fn congestion_ctrl_type(mut self, value: TcpCongestionControlType) -> Self {
+        self.congestion_ctrl_type = value;
         self
     }
 

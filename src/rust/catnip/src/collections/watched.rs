@@ -68,6 +68,11 @@ impl<T: Copy> WatchedValue<T> {
         })
     }
 
+    pub fn modify_without_notify(&self, f: impl FnOnce(T) -> T) {
+        let mut inner = self.inner.borrow_mut();
+        inner.value = f(inner.value);
+    }
+
     pub fn get(&self) -> T {
         self.inner.borrow().value
     }

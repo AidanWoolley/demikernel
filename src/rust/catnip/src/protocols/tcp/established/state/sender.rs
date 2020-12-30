@@ -3,9 +3,11 @@ use crate::{
     collections::watched::WatchedValue,
     fail::Fail,
     protocols::tcp::SeqNumber,
+    protocols::tcp::options::TcpCongestionControlType,
     sync::Bytes,
 };
 use std::{
+    boxed::Box,
     cell::RefCell,
     collections::VecDeque,
     convert::TryInto,
@@ -35,7 +37,15 @@ pub enum SenderState {
     Reset,
 }
 
-pub struct CongestionControlState<AlgParams> {
+pub trait CongestionControlAlgorithm: fmt::Debug {
+    fn on_dup_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber);
+    fn on_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber);
+    fn on_rto(&self, sender: &Sender); // Called immediately before retransmit executed
+    fn on_fast_retransmit(&self, sender: &Sender);
+}
+
+#[derive(Debug)]
+pub struct CongestionControl {
     pub cwnd: WatchedValue<u32>,
     pub ssthresh: WatchedValue<u32>,
     // flightSize = sent_seq_no - base_seq_no!
@@ -43,27 +53,18 @@ pub struct CongestionControlState<AlgParams> {
     pub duplicate_ack_count: WatchedValue<u32>,
     pub in_fast_recovery: WatchedValue<bool>,
     pub fast_retransmit_now: WatchedValue<bool>,
-    pub params: AlgParams
-}
-
-impl<AlgParams: fmt::Debug> fmt::Debug for CongestionControlState<AlgParams> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("CongestionControlState")
-            .field("cwnd", &self.cwnd)
-            .field("ssthresh", &self.ssthresh)
-            .field("params", &self.params)
-            .finish()
-    }
-}
-
-impl<AlgParams> CongestionControlState<AlgParams> {
-    pub fn new(mss: usize, params: AlgParams) -> Self {
+    pub algorithm: Box<dyn CongestionControlAlgorithm>,
+} 
+ 
+impl CongestionControl {
+    pub fn new (mss: usize, algorithm: Box<dyn CongestionControlAlgorithm>) -> Self {
         let mss: u32 = mss.try_into().unwrap();
         let initial_cwnd = match mss {
             0..=1095 => 4 * mss,
             1096..=2190 => 3 * mss,
             _ => 2 * mss
         };
+
         Self {
             cwnd: WatchedValue::new(initial_cwnd),
             // According to RFC5681 ssthresh should be initialised 'arbitrarily high'
@@ -71,12 +72,24 @@ impl<AlgParams> CongestionControlState<AlgParams> {
             duplicate_ack_count: WatchedValue::new(0),
             in_fast_recovery: WatchedValue::new(false),
             fast_retransmit_now: WatchedValue::new(false),
-            params,
+            algorithm,
         }
     }
 }
 
-pub struct CubicParams {
+// Implementation of congestion control which does nothing.
+#[derive(Debug)]
+pub struct NoCongestionControl {}
+
+impl CongestionControlAlgorithm for NoCongestionControl {
+    fn on_dup_ack_received(&self, _sender: &Sender, _ack_seq_no: SeqNumber) {}
+    fn on_ack_received(&self, _sender: &Sender, _ack_seq_no: SeqNumber) {}
+    fn on_rto(&self, _sender: &Sender) {}
+    fn on_fast_retransmit(&self, _sender: &Sender) {}
+}
+
+#[derive(Debug)]
+pub struct Cubic {
     pub C: f32,
     pub K: f32,
     pub beta_cubic: f32,
@@ -85,15 +98,76 @@ pub struct CubicParams {
     pub w_last_max: WatchedValue<u32>,
 }
 
-impl CubicParams {
+impl CongestionControlAlgorithm for Cubic {
+    fn on_dup_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber) {
+        let cc = &sender.congestion_ctrl;
+        cc.duplicate_ack_count.modify(|s| s + 1);
+        let duplicate_ack_count = cc.duplicate_ack_count.get();
+        let mss: u32 = sender.mss.try_into().unwrap();
+        if duplicate_ack_count == 3 {
+            // Check against recover specified in RFC6582
+            if ack_seq_no - Wrapping(1) > self.recover.get() {
+                cc.in_fast_recovery.set(true);
+                self.recover.set(sender.sent_seq_no.get());
+                let cwnd = cc.cwnd.get();
+                self.w_max.set(cwnd);
+                cc.ssthresh.set(((2f32).max(cwnd as f32 * self.beta_cubic) * mss as f32) as u32);
+                cc.cwnd.modify(|s| (s as f32 * self.beta_cubic) as u32);
+                cc.fast_retransmit_now.set(true);
+            }
+        } else if duplicate_ack_count > 3 || cc.in_fast_recovery.get() {
+            cc.cwnd.modify(|s| s + mss);
+        }
+    }
+
+    fn on_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber) {
+        let cc = &sender.congestion_ctrl;
+        let bytes_outstanding = sender.sent_seq_no.get() - sender.base_seq_no.get();
+        let bytes_acknowledged = ack_seq_no - sender.base_seq_no.get();
+
+        cc.duplicate_ack_count.set(0);
+        if cc.in_fast_recovery.get() {
+            // Fast Recovery response to new data
+            let mss: u32 = sender.mss.try_into().unwrap();
+            if ack_seq_no > self.recover.get() {
+                // Full acknowledgement
+                let ssthresh = cc.ssthresh.get();
+                cc.cwnd.set(cmp::min(ssthresh, cmp::max(bytes_outstanding.0, mss) + mss));
+                cc.in_fast_recovery.set(false);
+            } else {
+                // Partial acknowledgement
+                cc.fast_retransmit_now.set(true);
+                if bytes_acknowledged.0 >= mss {
+                    cc.cwnd.modify(|s| s - bytes_acknowledged.0 + mss);
+                } else {
+                    cc.cwnd.modify(|s| s - bytes_acknowledged.0);
+                }
+                // We stay in fast recovery mode here because we haven't acknowledged all data up to `recovery`
+            }
+        }
+    }
+
+    fn on_rto(&self, sender: &Sender) {
+        self.recover.set(sender.sent_seq_no.get());
+        sender.congestion_ctrl.in_fast_recovery.set(false);
+    }
+
+    fn on_fast_retransmit(&self, sender: &Sender) {
+        // NOTE: Could we potentially miss FastRetransmit requests with just a flag? Should we really have a count/queue?
+        // I suspect it doesn't matter because we only retransmit on the 3rd repeat ACK precisely...
+        sender.congestion_ctrl.fast_retransmit_now.modify_without_notify(|_| false);
+    }
+}
+
+impl Cubic {
     pub fn new(seq_no: SeqNumber) -> Self {
         Self {
             C: 0.4,
             K: 0.0,
             beta_cubic: 0.7,
             recover: WatchedValue::new(seq_no),
-            W_max: 0,
-            W_last_max: 0,
+            w_max: WatchedValue::new(0),
+            w_last_max: WatchedValue::new(0),
         }
     }
 }
@@ -125,7 +199,7 @@ pub struct Sender {
     pub retransmit_deadline: WatchedValue<Option<Instant>>,
     pub rto: RefCell<RtoCalculator>,
 
-    pub congestion_ctrl_state: CongestionControlState<CubicParams>,
+    pub congestion_ctrl: CongestionControl,
 }
 
 impl fmt::Debug for Sender {
@@ -144,7 +218,11 @@ impl fmt::Debug for Sender {
 }
 
 impl Sender {
-    pub fn new(seq_no: SeqNumber, window_size: u32, window_scale: u8, mss: usize) -> Self {
+    pub fn new(seq_no: SeqNumber, window_size: u32, window_scale: u8, mss: usize, congestion_ctrl_type: TcpCongestionControlType) -> Self {
+        let congestion_ctrl_alg: Box<dyn CongestionControlAlgorithm> = match congestion_ctrl_type {
+            TcpCongestionControlType::None => Box::new(NoCongestionControl{}),
+            TcpCongestionControlType::Cubic => Box::new(Cubic::new(seq_no)),
+        }; 
         Self {
             state: WatchedValue::new(SenderState::Open),
 
@@ -161,7 +239,7 @@ impl Sender {
             retransmit_deadline: WatchedValue::new(None),
             rto: RefCell::new(RtoCalculator::new()),
 
-            congestion_ctrl_state: CongestionControlState::<CubicParams>::new(mss, CubicParams::new(seq_no))
+            congestion_ctrl: CongestionControl::new(mss, congestion_ctrl_alg),
         }
     }
 
@@ -178,7 +256,7 @@ impl Sender {
         let win_sz = self.window_size.get();
         let base_seq = self.base_seq_no.get();
         let sent_seq = self.sent_seq_no.get();
-        let cwnd = self.congestion_ctrl_state.cwnd.get();
+        let cwnd = self.congestion_ctrl.cwnd.get();
         let Wrapping(sent_data) = sent_seq - base_seq;
 
         // Fast path: Try to send the data immediately.
@@ -243,45 +321,10 @@ impl Sender {
             // Duplicate ACK
             // TODO: Congestion control
             // TODO: Handle fast retransmit here.
-            self.congestion_ctrl_state.duplicate_ack_count.modify(|s| s + 1);
-            let duplicate_ack_count = self.congestion_ctrl_state.duplicate_ack_count.get();
-            let mss: u32 = self.mss.try_into().unwrap();
-            if duplicate_ack_count == 3 {
-                // Check against recover specified in RFC6582
-                if ack_seq_no - Wrapping(1) > self.congestion_ctrl_state.params.recover.get() {
-                    self.congestion_ctrl_state.in_fast_recovery.modify(|_| true);
-                    self.congestion_ctrl_state.params.recover.modify(|_| sent_seq_no);
-                    let cwnd = self.congestion_ctrl_state.cwnd.get();
-                    self.congestion_ctrl_state.params.w_max.modify(|_| cwnd);
-                    self.congestion_ctrl_state.ssthresh.modify(|_| ((2f32).max(cwnd as f32 * self.congestion_ctrl_state.params.beta_cubic) * mss as f32) as u32);
-                    self.congestion_ctrl_state.cwnd.modify(|s| (s as f32 * self.congestion_ctrl_state.params.beta_cubic) as u32);
-                    self.congestion_ctrl_state.fast_retransmit_now.modify(|_| true);
-                }
-            } else if duplicate_ack_count > 3 || self.congestion_ctrl_state.in_fast_recovery.get() {
-                self.congestion_ctrl_state.cwnd.modify(|s| s + mss);
-            }
+            self.congestion_ctrl.algorithm.on_dup_ack_received(&self, ack_seq_no);
             return Ok(());
         } else {
-            self.congestion_ctrl_state.duplicate_ack_count.modify(|_| 0);
-            if self.congestion_ctrl_state.in_fast_recovery.get() {
-                // Fast Recovery response to new data
-                let mss: u32 = self.mss.try_into().unwrap();
-                if ack_seq_no > self.congestion_ctrl_state.params.recover.get() {
-                    // Full acknowledgement
-                    let ssthresh = self.congestion_ctrl_state.ssthresh.get();
-                    self.congestion_ctrl_state.cwnd.modify(|_| cmp::min(ssthresh, cmp::max(bytes_outstanding.0, mss) + mss));
-                    self.congestion_ctrl_state.in_fast_recovery.modify(|_| false);
-                } else {
-                    // Partial acknowledgement
-                    self.congestion_ctrl_state.fast_retransmit_now.modify(|_| true);
-                    if bytes_acknowledged.0 >= mss {
-                        self.congestion_ctrl_state.cwnd.modify(|s| s - bytes_acknowledged.0 + mss);
-                    } else {
-                        self.congestion_ctrl_state.cwnd.modify(|s| s - bytes_acknowledged.0);
-                    }
-                    // We stay in fast recovery mode here because we haven't acknowledged all data up to `recovery`
-                }
-            }
+            self.congestion_ctrl.algorithm.on_ack_received(&self, ack_seq_no);
         }
 
         if ack_seq_no == sent_seq_no {

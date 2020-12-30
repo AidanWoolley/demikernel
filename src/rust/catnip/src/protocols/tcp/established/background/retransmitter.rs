@@ -16,7 +16,7 @@ pub enum RetransmitCause {
     TimeOut,
     FastRetransmit
 }
-
+ 
 
 pub async fn retransmit<RT: Runtime>(cause: RetransmitCause, cb: &Rc<ControlBlock<RT>>) -> Result<(), Fail>{
     // Our retransmission timer fired, so we need to resend a packet.
@@ -58,7 +58,7 @@ pub async fn retransmitter<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, F
         let (rtx_deadline, rtx_deadline_changed) = cb.sender.retransmit_deadline.watch();
         futures::pin_mut!(rtx_deadline_changed);
 
-        let (rtx_fast_retransmit, rtx_fast_retransmit_changed) = cb.sender.congestion_ctrl_state.fast_retransmit_now.watch();
+        let (rtx_fast_retransmit, rtx_fast_retransmit_changed) = cb.sender.congestion_ctrl.fast_retransmit_now.watch();
         futures::pin_mut!(rtx_fast_retransmit_changed);
 
         let rtx_future = match rtx_deadline {
@@ -71,16 +71,12 @@ pub async fn retransmitter<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, F
             _ = rtx_future => {
                 // NOTE: Congestion control
                 // On retransmit time out, we update `recover` and exit fast recovery (if we're in it) by setting `duplicate_ack_count` to 0
-                cb.sender.congestion_ctrl_state.params.recover.modify(|_| cb.sender.sent_seq_no.get());
-                cb.sender.congestion_ctrl_state.in_fast_recovery.modify(|_| false);
+                cb.sender.congestion_ctrl.algorithm.on_rto(&cb.sender);
                 retransmit(RetransmitCause::TimeOut, &cb).await?;
             },
             _ = rtx_fast_retransmit_changed => {
+                cb.sender.congestion_ctrl.algorithm.on_fast_retransmit(&cb.sender);
                 retransmit(RetransmitCause::FastRetransmit, &cb).await?;
-                // TODO: Congestion control
-                // NOTE: Could we potentially miss FastRetransmit requests with just a flag? Should we really have a count/queue?
-                // I suspect it doesn't matter because we only retransmit on the 3rd repeat ACK precisely.
-                cb.sender.congestion_ctrl_state.fast_retransmit_now.modify(|_| false);
             }
         }
     }

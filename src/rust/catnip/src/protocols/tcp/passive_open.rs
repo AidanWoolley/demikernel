@@ -6,6 +6,7 @@ use super::{
         ControlBlock,
     },
     isn_generator::IsnGenerator,
+    options::TcpCongestionControlType,
 };
 use crate::{
     fail::Fail,
@@ -166,7 +167,7 @@ impl<RT: Runtime> PassiveSocket<RT> {
                     details: "Invalid SYN+ACK seq num",
                 });
             }
-            let sender = Sender::new(local_isn + Wrapping(1), window_size, window_scale, mss);
+            let sender = Sender::new(local_isn + Wrapping(1), window_size, window_scale, mss, TcpCongestionControlType::Cubic);
             let receiver = Receiver::new(
                 remote_isn + Wrapping(1),
                 self.rt.tcp_options().receive_window_size as u32,
