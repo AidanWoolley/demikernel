@@ -38,7 +38,6 @@ pub enum SenderState {
 }
 
 pub trait CongestionControlAlgorithm: fmt::Debug {
-    fn on_dup_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber);
     fn on_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber);
     fn on_rto(&self, sender: &Sender); // Called immediately before retransmit executed
     fn on_fast_retransmit(&self, sender: &Sender);
@@ -82,8 +81,7 @@ impl CongestionControl {
 pub struct NoCongestionControl {}
 
 impl CongestionControlAlgorithm for NoCongestionControl {
-    fn on_dup_ack_received(&self, _sender: &Sender, _ack_seq_no: SeqNumber) {}
-    fn on_ack_received(&self, _sender: &Sender, _ack_seq_no: SeqNumber) {}
+    fn on_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber) {}
     fn on_rto(&self, _sender: &Sender) {}
     fn on_fast_retransmit(&self, _sender: &Sender) {}
 }
@@ -99,14 +97,18 @@ pub struct Cubic {
 }
 
 impl CongestionControlAlgorithm for Cubic {
-    fn on_dup_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber) {
+    fn on_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber) {
+        let bytes_outstanding = sender.sent_seq_no.get() - sender.base_seq_no.get();
+        let bytes_acknowledged = ack_seq_no - sender.base_seq_no.get();
         let cc = &sender.congestion_ctrl;
-        cc.duplicate_ack_count.modify(|s| s + 1);
-        let duplicate_ack_count = cc.duplicate_ack_count.get();
         let mss: u32 = sender.mss.try_into().unwrap();
-        if duplicate_ack_count == 3 {
-            // Check against recover specified in RFC6582
-            if ack_seq_no - Wrapping(1) > self.recover.get() {
+
+        if bytes_acknowledged.0 == 0 {
+            // ACK is a duplicate
+            cc.duplicate_ack_count.modify(|s| s + 1);
+            let duplicate_ack_count = cc.duplicate_ack_count.get();
+            if duplicate_ack_count == 3 && ack_seq_no - Wrapping(1) > self.recover.get() {
+                // Check against recover specified in RFC6582
                 cc.in_fast_recovery.set(true);
                 self.recover.set(sender.sent_seq_no.get());
                 let cwnd = cc.cwnd.get();
@@ -114,35 +116,28 @@ impl CongestionControlAlgorithm for Cubic {
                 cc.ssthresh.set(((2f32).max(cwnd as f32 * self.beta_cubic) * mss as f32) as u32);
                 cc.cwnd.modify(|s| (s as f32 * self.beta_cubic) as u32);
                 cc.fast_retransmit_now.set(true);
+            } else if duplicate_ack_count > 3 || cc.in_fast_recovery.get() {
+                cc.cwnd.modify(|s| s + mss);
             }
-        } else if duplicate_ack_count > 3 || cc.in_fast_recovery.get() {
-            cc.cwnd.modify(|s| s + mss);
-        }
-    }
-
-    fn on_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber) {
-        let cc = &sender.congestion_ctrl;
-        let bytes_outstanding = sender.sent_seq_no.get() - sender.base_seq_no.get();
-        let bytes_acknowledged = ack_seq_no - sender.base_seq_no.get();
-
-        cc.duplicate_ack_count.set(0);
-        if cc.in_fast_recovery.get() {
-            // Fast Recovery response to new data
-            let mss: u32 = sender.mss.try_into().unwrap();
-            if ack_seq_no > self.recover.get() {
-                // Full acknowledgement
-                let ssthresh = cc.ssthresh.get();
-                cc.cwnd.set(cmp::min(ssthresh, cmp::max(bytes_outstanding.0, mss) + mss));
-                cc.in_fast_recovery.set(false);
-            } else {
-                // Partial acknowledgement
-                cc.fast_retransmit_now.set(true);
-                if bytes_acknowledged.0 >= mss {
-                    cc.cwnd.modify(|s| s - bytes_acknowledged.0 + mss);
+        } else {
+            cc.duplicate_ack_count.set(0);
+            if cc.in_fast_recovery.get() {
+                // Fast Recovery response to new data
+                if ack_seq_no > self.recover.get() {
+                    // Full acknowledgement
+                    let ssthresh = cc.ssthresh.get();
+                    cc.cwnd.set(cmp::min(ssthresh, cmp::max(bytes_outstanding.0, mss) + mss));
+                    cc.in_fast_recovery.set(false);
                 } else {
-                    cc.cwnd.modify(|s| s - bytes_acknowledged.0);
+                    // Partial acknowledgement
+                    cc.fast_retransmit_now.set(true);
+                    if bytes_acknowledged.0 >= mss {
+                        cc.cwnd.modify(|s| s - bytes_acknowledged.0 + mss);
+                    } else {
+                        cc.cwnd.modify(|s| s - bytes_acknowledged.0);
+                    }
+                    // We stay in fast recovery mode here because we haven't acknowledged all data up to `recovery`
                 }
-                // We stay in fast recovery mode here because we haven't acknowledged all data up to `recovery`
             }
         }
     }
@@ -153,8 +148,9 @@ impl CongestionControlAlgorithm for Cubic {
     }
 
     fn on_fast_retransmit(&self, sender: &Sender) {
-        // NOTE: Could we potentially miss FastRetransmit requests with just a flag? Should we really have a count/queue?
+        // NOTE: Could we potentially miss FastRetransmit requests with just a flag?
         // I suspect it doesn't matter because we only retransmit on the 3rd repeat ACK precisely...
+        // We should really use some other mechanism here just because it would be nicer...
         sender.congestion_ctrl.fast_retransmit_now.modify_without_notify(|_| false);
     }
 }
@@ -317,14 +313,9 @@ impl Sender {
             });
         }
 
+        self.congestion_ctrl.algorithm.on_ack_received(&self, ack_seq_no);
         if bytes_acknowledged.0 == 0 {
-            // Duplicate ACK
-            // TODO: Congestion control
-            // TODO: Handle fast retransmit here.
-            self.congestion_ctrl.algorithm.on_dup_ack_received(&self, ack_seq_no);
             return Ok(());
-        } else {
-            self.congestion_ctrl.algorithm.on_ack_received(&self, ack_seq_no);
         }
 
         if ack_seq_no == sent_seq_no {
