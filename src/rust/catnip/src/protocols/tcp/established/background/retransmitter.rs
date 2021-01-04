@@ -58,7 +58,9 @@ pub async fn retransmitter<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, F
         let (rtx_deadline, rtx_deadline_changed) = cb.sender.retransmit_deadline.watch();
         futures::pin_mut!(rtx_deadline_changed);
 
-        let (rtx_fast_retransmit, rtx_fast_retransmit_changed) = cb.sender.congestion_ctrl.fast_retransmit_now.watch();
+        // I assume any change to the fast retransmit flag is an instruction to transmit, because I use `set_without_notify` to change it
+        // back to false (which I am acutely aware is hack...).
+        let (_rtx_fast_retransmit, rtx_fast_retransmit_changed) = cb.sender.congestion_ctrl.fast_retransmit_now.watch();
         futures::pin_mut!(rtx_fast_retransmit_changed);
 
         let rtx_future = match rtx_deadline {
