@@ -8,6 +8,7 @@ use crate::{
 };
 use std::{
     boxed::Box,
+    cell::Cell,
     cell::RefCell,
     collections::VecDeque,
     convert::TryInto,
@@ -86,23 +87,26 @@ impl CongestionControlAlgorithm for NoCongestionControl {
 
 #[derive(Debug)]
 pub struct Cubic {
-    pub C: f32,
-    pub K: f32,
+    pub t_start: Cell<Instant>,
+    pub c: f32,
     pub beta_cubic: f32,
     pub recover: WatchedValue<SeqNumber>,
-    pub w_max: WatchedValue<u32>,
-    pub w_last_max: WatchedValue<u32>,
+    pub rto_retransmitted_packet_in_flight: WatchedValue<bool>,
+    pub last_congestion_was_rto: WatchedValue<bool>,
+    pub w_max: WatchedValue<u32>
 }
 
 impl Cubic {
     pub fn new(seq_no: SeqNumber) -> Self {
         Self {
-            C: 0.4,
-            K: 0.0,
+            t_start: Cell::new(Instant::now()),
+            c: 0.4,
             beta_cubic: 0.7,
             recover: WatchedValue::new(seq_no),
+            // This just needs to be different to the initial seq no.
+            rto_retransmitted_packet_in_flight: WatchedValue::new(false),
+            last_congestion_was_rto: WatchedValue::new(false),
             w_max: WatchedValue::new(0),
-            w_last_max: WatchedValue::new(0),
         }
     }
 
@@ -139,6 +143,10 @@ impl Cubic {
         if ack_seq_no > self.recover.get() {
             // Full acknowledgement
             cc.cwnd.set(cmp::min(cc.ssthresh.get(), cmp::max(bytes_outstanding.0, mss) + mss));
+            // Record the time we go back into congestion avoidance
+            self.t_start.set(Instant::now());
+            // Record that we didn't enter CA from a timeout
+            self.last_congestion_was_rto.set(false);
             cc.in_fast_recovery.set(false);
         } else {
             // Partial acknowledgement
@@ -151,6 +159,74 @@ impl Cubic {
             // We stay in fast recovery mode here because we haven't acknowledged all data up to `recovery`
             // Thus, we don't reset t_start here either.
         }
+    }
+
+    fn k(&self, mss: f32) -> f32 {
+        if self.last_congestion_was_rto.get() {
+            0.0
+        } else {
+            (self.w_max.get() as f32 * (1.-self.beta_cubic)/(self.c * mss)).cbrt()
+        }
+    }
+
+    fn w_cubic(&self, t: f32, k: f32, mss: f32) -> f32 {
+        // The equation in RFC8312 is in terms of MSS but we want to store cwnd in terms of bytes,
+        // hence we multiply the return value by MSS
+        let w_max = self.w_max.get() as f32;
+        (self.c*(t-k)).powi(3) + w_max/mss
+    }
+
+    fn w_est(&self, t: f32, rtt: f32, mss: f32) -> f32 {
+        let bc = self.beta_cubic;
+        let w_max = self.w_max.get() as f32;
+        w_max * bc / mss + (3. * (1. - bc) / (1. + bc)) * t / rtt
+    }
+
+    fn on_ack_received_ss_ca(&self, sender: &Sender, ack_seq_no: SeqNumber) { 
+        let bytes_acknowledged = ack_seq_no - sender.base_seq_no.get();
+        let cc = &sender.congestion_ctrl;
+        let mss: u32 = sender.mss.try_into().unwrap();
+        let cwnd = cc.cwnd.get();
+        let ssthresh = cc.ssthresh.get();
+
+        if cwnd < ssthresh {
+            // Slow start
+            cc.cwnd.modify(|c| c + cmp::min(bytes_acknowledged.0, mss));
+        } else {
+            // Congestion avoidance
+            let t = self.t_start.get().elapsed().as_secs_f32();
+            let rtt = sender.rto.borrow().estimate().as_secs_f32();
+            let mss_f32 = mss as f32;
+            let k = self.k(mss_f32);
+            let w_est = self.w_est(t, rtt, mss_f32);
+            if self.w_cubic(t, k, mss_f32) < w_est { 
+                sender.congestion_ctrl.cwnd.set((w_est * mss_f32) as u32); 
+            } else {
+                let cwnd_f32 = cwnd as f32;
+                let cwnd_inc = ((self.w_cubic(t + rtt, k, mss_f32) * mss_f32) - cwnd_f32) / cwnd_f32;
+                sender.congestion_ctrl.cwnd.modify(|c| c + cwnd_inc as u32);
+            }
+        }
+    }
+
+    fn on_rto_ss_ca(&self, sender: &Sender) {
+        let cwnd = sender.congestion_ctrl.cwnd.get();
+        
+        self.w_max.set(cwnd);
+        sender.congestion_ctrl.cwnd.set(((cwnd as f32) * self.beta_cubic) as u32);
+
+        if !self.rto_retransmitted_packet_in_flight.get() {
+            // If we lost a retransmitted packet, we don't shrink ssthresh.
+            // So we have to check if a retransmitted packet was in flight before we shrink it.
+            sender.congestion_ctrl.ssthresh.set(cmp::max((cwnd as f32 * self.beta_cubic) as u32, 2 * sender.mss as u32));
+
+        }
+
+        // Used to decide whether to shrink ssthresh on rto
+        self.rto_retransmitted_packet_in_flight.set(true);
+
+        // Used to decide whether to set K to 0 for w_cubic
+        self.last_congestion_was_rto.set(true);
     }
 
     fn on_rto_fast_recovery(&self, sender: &Sender) {
@@ -169,17 +245,22 @@ impl CongestionControlAlgorithm for Cubic {
             self.on_dup_ack_received(sender, ack_seq_no);
         } else {
             cc.duplicate_ack_count.set(0);
+            // NOTE: Congestion Control
+            // I think the acknowledgement of new data means there is no retransmitted packet in flight right now
+            // How does this interact with repacketization?
+            self.rto_retransmitted_packet_in_flight.set(false);
             if cc.in_fast_recovery.get() {
                 // Fast Recovery response to new data
                 self.on_ack_received_fast_recovery(sender, ack_seq_no);
             } else {
-                // TODO: Congestion Control
-                // Implement SS / CA
+                self.on_ack_received_ss_ca(sender, ack_seq_no);
             }
         }
     }
 
     fn on_rto(&self, sender: &Sender) {
+        // Handle timeout for any of the algorithms we could currently be using
+        self.on_rto_ss_ca(sender);
         self.on_rto_fast_recovery(sender);
         
     }
