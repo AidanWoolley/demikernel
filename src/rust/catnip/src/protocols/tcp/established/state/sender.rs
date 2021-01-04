@@ -93,7 +93,8 @@ pub struct Cubic {
     pub recover: WatchedValue<SeqNumber>,
     pub rto_retransmitted_packet_in_flight: WatchedValue<bool>,
     pub last_congestion_was_rto: WatchedValue<bool>,
-    pub w_max: WatchedValue<u32>
+    pub w_max: WatchedValue<u32>,
+    pub fast_convergence: bool
 }
 
 impl Cubic {
@@ -107,6 +108,20 @@ impl Cubic {
             rto_retransmitted_packet_in_flight: WatchedValue::new(false),
             last_congestion_was_rto: WatchedValue::new(false),
             w_max: WatchedValue::new(0),
+            fast_convergence: true,
+        }
+    }
+
+    fn fast_convergence(&self, sender: &Sender) {
+        // The fast convergence algorithm assumes that w_max and w_last_max are stored in units of mss, so we do this
+        // division to prevent it being applied too often
+        let mss = sender.mss as u32;
+        let cwnd = sender.congestion_ctrl.cwnd.get();
+
+        if (cwnd / mss) < self.w_max.get() / mss {
+            self.w_max.set((cwnd as f32 * (1. + self.beta_cubic) / 2.) as u32);
+        } else {
+            self.w_max.set(cwnd);
         }
     }
 
@@ -123,7 +138,12 @@ impl Cubic {
             self.recover.set(sender.sent_seq_no.get());
             let cwnd = cc.cwnd.get();
             let reduced_cwnd = (cwnd as f32 * self.beta_cubic) as u32;
-            self.w_max.set(cwnd);
+
+            if self.fast_convergence {
+                self.fast_convergence(sender);
+            } else {
+                self.w_max.set(cwnd);
+            }
             cc.ssthresh.set(cmp::max(reduced_cwnd, 2 * mss));
             cc.cwnd.set(reduced_cwnd);
             cc.fast_retransmit_now.set(true);
@@ -211,8 +231,12 @@ impl Cubic {
 
     fn on_rto_ss_ca(&self, sender: &Sender) {
         let cwnd = sender.congestion_ctrl.cwnd.get();
-        
-        self.w_max.set(cwnd);
+
+        if self.fast_convergence {
+            self.fast_convergence(sender);
+        } else {
+            self.w_max.set(cwnd);
+        }
         sender.congestion_ctrl.cwnd.set(((cwnd as f32) * self.beta_cubic) as u32);
 
         if !self.rto_retransmitted_packet_in_flight.get() {
