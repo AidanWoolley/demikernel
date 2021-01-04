@@ -47,9 +47,9 @@ pub trait CongestionControlAlgorithm: fmt::Debug {
 #[derive(Debug)]
 pub struct CongestionControl {
     pub cwnd: WatchedValue<u32>,
-    pub ssthresh: WatchedValue<u32>,
-    pub duplicate_ack_count: WatchedValue<u32>,
-    pub in_fast_recovery: WatchedValue<bool>,
+    pub ssthresh: Cell<u32>,
+    pub duplicate_ack_count: Cell<u32>,
+    pub in_fast_recovery: Cell<bool>,
     pub fast_retransmit_now: WatchedValue<bool>,
     pub algorithm: Box<dyn CongestionControlAlgorithm>,
 } 
@@ -66,9 +66,9 @@ impl CongestionControl {
         Self {
             cwnd: WatchedValue::new(initial_cwnd),
             // According to RFC5681 ssthresh should be initialised 'arbitrarily high'
-            ssthresh: WatchedValue::new(u32::MAX),
-            duplicate_ack_count: WatchedValue::new(0),
-            in_fast_recovery: WatchedValue::new(false),
+            ssthresh: Cell::new(u32::MAX), 
+            duplicate_ack_count: Cell::new(0),
+            in_fast_recovery: Cell::new(false),
             fast_retransmit_now: WatchedValue::new(false),
             algorithm,
         }
@@ -90,10 +90,10 @@ pub struct Cubic {
     pub t_start: Cell<Instant>,
     pub c: f32,
     pub beta_cubic: f32,
-    pub recover: WatchedValue<SeqNumber>,
-    pub rto_retransmitted_packet_in_flight: WatchedValue<bool>,
-    pub last_congestion_was_rto: WatchedValue<bool>,
-    pub w_max: WatchedValue<u32>,
+    pub recover: Cell<SeqNumber>,
+    pub rto_retransmitted_packet_in_flight: Cell<bool>,
+    pub last_congestion_was_rto: Cell<bool>,
+    pub w_max: Cell<u32>,
     pub fast_convergence: bool
 }
 
@@ -103,11 +103,11 @@ impl Cubic {
             t_start: Cell::new(Instant::now()),
             c: 0.4,
             beta_cubic: 0.7,
-            recover: WatchedValue::new(seq_no),
+            recover: Cell::new(seq_no),
             // This just needs to be different to the initial seq no.
-            rto_retransmitted_packet_in_flight: WatchedValue::new(false),
-            last_congestion_was_rto: WatchedValue::new(false),
-            w_max: WatchedValue::new(0),
+            rto_retransmitted_packet_in_flight: Cell::new(false),
+            last_congestion_was_rto: Cell::new(false),
+            w_max: Cell::new(0),
             fast_convergence: true,
         }
     }
@@ -129,7 +129,8 @@ impl Cubic {
         let cc = &sender.congestion_ctrl;
         let mss: u32 = sender.mss.try_into().unwrap();
 
-        cc.duplicate_ack_count.modify(|a| a + 1);
+        // `Cell.update` is a nightly feature but this will be fine instead.
+        cc.duplicate_ack_count.set(cc.duplicate_ack_count.get() + 1);
         let duplicate_ack_count = cc.duplicate_ack_count.get();
 
         if duplicate_ack_count == 3 && ack_seq_no - Wrapping(1) > self.recover.get() {
