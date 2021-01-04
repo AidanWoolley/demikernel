@@ -42,6 +42,7 @@ pub trait CongestionControlAlgorithm: fmt::Debug {
     fn on_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber);
     fn on_rto(&self, sender: &Sender); // Called immediately before retransmit executed
     fn on_fast_retransmit(&self, sender: &Sender);
+    fn on_base_seq_no_wraparound(&self);
 }
 
 #[derive(Debug)]
@@ -83,6 +84,7 @@ impl CongestionControlAlgorithm for NoCongestionControl {
     fn on_ack_received(&self, _sender: &Sender, _ack_seq_no: SeqNumber) {}
     fn on_rto(&self, _sender: &Sender) {}
     fn on_fast_retransmit(&self, _sender: &Sender) {}
+    fn on_base_seq_no_wraparound(&self) {}
 }
 
 #[derive(Debug)]
@@ -296,6 +298,11 @@ impl CongestionControlAlgorithm for Cubic {
         // I should really use some other mechanism here just because it would be nicer...
         sender.congestion_ctrl.fast_retransmit_now.set_without_notify(false);
     }
+
+    fn on_base_seq_no_wraparound(&self) {
+        // This still won't let us enter fast recovery if base_seq_no wraps to precisely 0, but there's nothing to be done in that case.
+        self.recover.set(Wrapping(0)); 
+    }
 }
 
 pub struct Sender {
@@ -477,10 +484,12 @@ impl Sender {
                 break;
             }
         }
-        // TODO: Congestion control
-        // TODO: Modify cwnd for slow start, congestion avoidance or fast recovery
-
         self.base_seq_no.modify(|b| b + bytes_acknowledged);
+        let new_base_seq_no = self.base_seq_no.get();
+        if new_base_seq_no < base_seq_no {
+            // We've wrapped around, and so we need to do some bookkeeping
+            self.congestion_ctrl.algorithm.on_base_seq_no_wraparound();
+        }
 
         Ok(())
     }
