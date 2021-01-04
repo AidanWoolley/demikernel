@@ -57,6 +57,11 @@ impl<T: Copy> WatchedValue<T> {
         self.modify(|_| new_value)
     }
 
+    pub fn set_without_notify(&self, new_value: T) {
+        let mut inner = self.inner.borrow_mut();
+        inner.value = new_value;
+    }
+
     pub fn modify(&self, f: impl FnOnce(T) -> T) {
         let mut inner = self.inner.borrow_mut();
         inner.value = f(inner.value);
@@ -66,11 +71,6 @@ impl<T: Copy> WatchedValue<T> {
             }
             waiter.state = WatchState::Completed { polled: false };
         })
-    }
-
-    pub fn modify_without_notify(&self, f: impl FnOnce(T) -> T) {
-        let mut inner = self.inner.borrow_mut();
-        inner.value = f(inner.value);
     }
 
     pub fn get(&self) -> T {
