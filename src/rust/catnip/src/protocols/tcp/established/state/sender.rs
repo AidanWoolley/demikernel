@@ -96,7 +96,8 @@ pub struct Cubic {
     pub rto_retransmitted_packet_in_flight: Cell<bool>,
     pub last_congestion_was_rto: Cell<bool>,
     pub w_max: Cell<u32>,
-    pub fast_convergence: bool
+    pub fast_convergence: bool,
+    pub prev_ack_seq_no: Cell<SeqNumber>,
 }
 
 impl Cubic {
@@ -111,6 +112,7 @@ impl Cubic {
             last_congestion_was_rto: Cell::new(false),
             w_max: Cell::new(0),
             fast_convergence: true,
+            prev_ack_seq_no: Cell::new(seq_no),
         }
     }
 
@@ -134,12 +136,22 @@ impl Cubic {
         // `Cell.update` is a nightly feature but this will be fine instead.
         cc.duplicate_ack_count.set(cc.duplicate_ack_count.get() + 1);
         let duplicate_ack_count = cc.duplicate_ack_count.get();
+        let prev_ack_seq_no = self.prev_ack_seq_no.get();
+        let ack_seq_no_diff = if ack_seq_no > prev_ack_seq_no {
+            ack_seq_no.0 - prev_ack_seq_no.0
+        } else {
+            // Handle the case where the current ack_seq_no has wrapped and the previous hasn't
+            // The brackets are insurance against an overflow error
+            ack_seq_no.0 + 1 + (u32::MAX - prev_ack_seq_no.0)
+        };
+        let cwnd = cc.cwnd.get();
+        let ack_covers_recover = ack_seq_no - Wrapping(1) > self.recover.get();
+        let retransmitted_packet_dropped_heuristic = cwnd > mss && ack_seq_no_diff <= 4 * mss;
 
-        if duplicate_ack_count == 3 && ack_seq_no - Wrapping(1) > self.recover.get() {
+        if duplicate_ack_count == 3 && (ack_covers_recover || retransmitted_packet_dropped_heuristic) { 
             // Check against recover specified in RFC6582
             cc.in_fast_recovery.set(true);
             self.recover.set(sender.sent_seq_no.get());
-            let cwnd = cc.cwnd.get();
             let reduced_cwnd = (cwnd as f32 * self.beta_cubic) as u32;
 
             if self.fast_convergence {
@@ -282,6 +294,8 @@ impl CongestionControlAlgorithm for Cubic {
             } else {
                 self.on_ack_received_ss_ca(sender, ack_seq_no);
             }
+            // Used to handle dup ACKs after timeout
+            self.prev_ack_seq_no.set(ack_seq_no);
         }
     }
 
