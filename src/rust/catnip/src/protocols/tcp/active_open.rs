@@ -173,7 +173,8 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
             .expect("TODO: Window size overflow")
             .try_into()
             .expect("TODO: Window size overflow");
-
+        // TODO: Congestion Control
+        // Use correct default value / option
         let sender = Sender::new(expected_seq, window_size, window_scale, mss, TcpCongestionControlType::Cubic);
         let receiver = Receiver::new(
             remote_seq_num,

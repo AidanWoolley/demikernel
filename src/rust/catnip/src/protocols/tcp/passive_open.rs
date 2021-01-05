@@ -167,6 +167,8 @@ impl<RT: Runtime> PassiveSocket<RT> {
                     details: "Invalid SYN+ACK seq num",
                 });
             }
+            // TODO: Congestion Control
+            // Use correct default value / option
             let sender = Sender::new(local_isn + Wrapping(1), window_size, window_scale, mss, TcpCongestionControlType::Cubic);
             let receiver = Receiver::new(
                 remote_isn + Wrapping(1),
