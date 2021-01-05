@@ -128,8 +128,10 @@ impl Sender {
 
         // Fast path: Try to send the data immediately.
         let in_flight_after_send = sent_data + buf_len;
-        
-        if win_sz > 0 && win_sz >= in_flight_after_send && cwnd >= in_flight_after_send {
+        // The limited transmit algorithm can increase the effective size of cwnd by up to 2MSS
+        let effective_cwnd = cwnd + self.congestion_ctrl.get_limited_transmit_cwnd_increase();
+
+        if win_sz > 0 && win_sz >= in_flight_after_send && effective_cwnd >= in_flight_after_send {
             if let Some(remote_link_addr) = cb.arp.try_query(cb.remote.address()) {
                 let mut header = cb.tcp_header();
                 header.seq_num = sent_seq;

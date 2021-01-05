@@ -31,8 +31,14 @@ pub trait FastRetransmitRecoveryAlgorithm where Self: SlowStartCongestionAvoidan
     fn on_base_seq_no_wraparound(&self, _sender: &Sender) {}
 }
 
+pub trait LimitedTransmitAlgorithm where Self: SlowStartCongestionAvoidanceAlgorithm {
+    fn get_limited_transmit_cwnd_increase(&self) -> u32 { 0 }
+    fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>);
+} 
+
 pub trait CongestionControl: SlowStartCongestionAvoidanceAlgorithm +
                              FastRetransmitRecoveryAlgorithm +
+                             LimitedTransmitAlgorithm +
                              Debug {
     fn new(mss: usize, seq_no: SeqNumber) -> Self where Self: Sized;
 }
@@ -65,6 +71,10 @@ impl FastRetransmitRecoveryAlgorithm for NoCongestionControl {
     fn watch_retransmit_now_flag(&self) -> (bool, WatchFuture<'_, bool>) { self.retransmit_now.watch() }
 }
 
+impl LimitedTransmitAlgorithm for NoCongestionControl {
+    fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>) { self.limited_transmit_cwnd_increase.watch() }
+}
+
 #[derive(Debug)]
 pub struct Cubic {
     pub mss: u32, // Just for convenience, otherwise we have `as u32` or `.try_into().unwrap()` scattered everywhere...
@@ -83,6 +93,8 @@ pub struct Cubic {
     pub recover: Cell<SeqNumber>,                   // If we receive dup ACKs with sequence numbers greater than this we'll attempt fast recovery
     pub prev_ack_seq_no: Cell<SeqNumber>,           // The previous highest ACK sequence number
     pub duplicate_ack_count: Cell<u32>,             // The number of consecutive duplicate ACKs we've received
+    
+    pub limited_transmit_cwnd_increase: WatchedValue<u32>, // The amount by which cwnd should be increased due to the limited transit algorithm
 }
 
 impl CongestionControl for Cubic {
@@ -109,6 +121,8 @@ impl CongestionControl for Cubic {
             fast_convergence: true,     // TODO: Congestion Control Need to get this value from config...
             prev_ack_seq_no: Cell::new(seq_no), // RFC6582 doesn't specify the initial value, but this seems sensible
             duplicate_ack_count: Cell::new(0),
+
+            limited_transmit_cwnd_increase: WatchedValue::new(0),
         }
     }
 }
@@ -132,9 +146,20 @@ impl Cubic {
         }
     }
 
+    fn calculate_limited_transmit_cwnd_increase(&self) {
+        let dup_ack_count = self.duplicate_ack_count.get();
+        let limited_transmit_increase = if dup_ack_count < Self::DUP_ACK_THRESHOLD {
+            self.mss * dup_ack_count
+        } else {
+            0
+        };
+        self.limited_transmit_cwnd_increase.set(limited_transmit_increase);
+    }
+
     fn increment_dup_ack_count(&self) -> u32 {
         let duplicate_ack_count = self.duplicate_ack_count.get() + 1;
         self.duplicate_ack_count.set(duplicate_ack_count);
+        self.calculate_limited_transmit_cwnd_increase();
         duplicate_ack_count
 
     }
@@ -293,6 +318,7 @@ impl SlowStartCongestionAvoidanceAlgorithm for Cubic {
             self.on_dup_ack_received(sender, ack_seq_no);
         } else {
             self.duplicate_ack_count.set(0);
+            self.calculate_limited_transmit_cwnd_increase();
 
             self.retransmitted_packets_in_flight.set(self.retransmitted_packets_in_flight.get() - 1);
             if self.in_fast_recovery.get() {
@@ -330,4 +356,9 @@ impl FastRetransmitRecoveryAlgorithm for Cubic {
         // This still won't let us enter fast recovery if base_seq_no wraps to precisely 0, but there's nothing to be done in that case.
         self.recover.set(Wrapping(0)); 
     }
+}
+
+impl LimitedTransmitAlgorithm for Cubic {
+    fn get_limited_transmit_cwnd_increase(&self) -> u32 { self.limited_transmit_cwnd_increase.get() }
+    fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>) { self.limited_transmit_cwnd_increase.watch() }
 }

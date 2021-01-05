@@ -83,13 +83,20 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         let (cwnd, cwnd_changed) = cb.sender.congestion_ctrl.watch_cwnd();
         futures::pin_mut!(cwnd_changed);
 
+        // The limited transmit algorithm may increase the effective size of cwnd by up to 2 * mss
+        let (ltci, ltci_changed) = cb.sender.congestion_ctrl.watch_limited_transmit_cwnd_increase();
+        futures::pin_mut!(ltci_changed);
+
+        let effective_cwnd = cwnd + ltci;
+
         let Wrapping(sent_data) = sent_seq - base_seq;
-        if win_sz <= sent_data || cwnd <= sent_data {
+        if win_sz <= sent_data || effective_cwnd <= sent_data {
             futures::select_biased! {
                 _ = base_seq_changed => continue 'top,
                 _ = sent_seq_changed => continue 'top,
                 _ = win_sz_changed => continue 'top,
                 _ = cwnd_changed => continue 'top,
+                _ = ltci_changed => continue 'top,
             }
         }
 
