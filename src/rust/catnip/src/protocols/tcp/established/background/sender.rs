@@ -80,6 +80,8 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         let (base_seq, base_seq_changed) = cb.sender.base_seq_no.watch();
         futures::pin_mut!(base_seq_changed);
 
+        // Before we get cwnd for the check, we prompt it to shrink it if the connection has been idle
+        cb.sender.congestion_ctrl.on_cwnd_check_before_send(&cb.sender);
         let (cwnd, cwnd_changed) = cb.sender.congestion_ctrl.watch_cwnd();
         futures::pin_mut!(cwnd_changed);
 
@@ -112,6 +114,8 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
             .expect("No unsent data with sequence number gap?");
         let segment_data_len = segment_data.len();
         assert!(segment_data_len > 0);
+
+        cb.sender.congestion_ctrl.on_send(&cb.sender);
 
         let mut header = cb.tcp_header();
         header.seq_num = sent_seq;

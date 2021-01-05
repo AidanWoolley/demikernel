@@ -9,16 +9,23 @@ use std::{
     convert::TryInto,
     fmt::Debug,
     num::Wrapping,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 pub trait SlowStartCongestionAvoidanceAlgorithm { 
     fn get_cwnd(&self) -> u32 { u32::MAX }
     fn watch_cwnd(&self) -> (u32,  WatchFuture<'_, u32>);
 
+    // Called immediately before the cwnd check is performed before data is sent
+    fn on_cwnd_check_before_send(&self, _sender: &Sender) {}
+
     fn on_ack_received(&self, _sender: &Sender, _ack_seq_no: SeqNumber) {}
-    // Called immediately before retransmit executed
+    
+    // Called immediately before retransmit after RTO
     fn on_rto(&self, _sender: &Sender) {}
+
+    // Called immediately before a segment is sent for the 1st time
+    fn on_send(&self, _sender: &Sender) {}
 }
 
 pub trait FastRetransmitRecoveryAlgorithm where Self: SlowStartCongestionAvoidanceAlgorithm {
@@ -82,8 +89,11 @@ pub struct Cubic {
     pub ca_start: Cell<Instant>,    // The time we started the current congestion avoidance
     pub cwnd: WatchedValue<u32>,    // Congestion window: Maximum number of bytes that may be in flight ot prevent congestion
     pub fast_convergence: bool,     // Should we employ the fast convergence algorithm (Only recommended if there are multiple CUBIC streams on the same network, in which case we'll cede capacity to new ones faster)
+    pub initial_cwnd: u32,          // The initial value of cwnd, which gets used if the connection ever resets
+    pub last_send_time: Cell<Instant>,  // The moment at which we last sent data
     pub last_congestion_was_rto: Cell<bool>,    // A flag for whether the last congestion event was detected by RTO
     pub retransmitted_packets_in_flight: Cell<u32>, // A flag for if there is currently a retransmitted packet in flight
+    pub rtt_at_last_send: Cell<Duration>,    // The RTT at the moment we last sent data
     pub ssthresh: Cell<u32>,        // The size of cwnd at which we will change from using slow start to congestion avoidance
     pub w_max: Cell<u32>,           // The size of cwnd before the previous congestion event
 
@@ -112,7 +122,10 @@ impl CongestionControl for Cubic {
             ca_start: Cell::new(Instant::now()), // record the start time of the congestion avoidance period
             cwnd: WatchedValue::new(initial_cwnd),
             fast_convergence: true,     // TODO: Congestion Control Need to get this value from config...
+            initial_cwnd,
+            last_send_time: Cell::new(Instant::now()),
             retransmitted_packets_in_flight: Cell::new(0),
+            rtt_at_last_send: Cell::new(Duration::new(1, 0)), // The default RTT is 1 sec
             ssthresh: Cell::new(u32::MAX), // According to RFC5681 ssthresh should be initialised 'arbitrarily high'
             w_max: Cell::new(0), // Because ssthresh is u32::MAX, this will be set appropriately during the 1st congestion event
             last_congestion_was_rto: Cell::new(false),
@@ -311,6 +324,19 @@ impl Cubic {
 impl SlowStartCongestionAvoidanceAlgorithm for Cubic {
     fn get_cwnd(&self) -> u32 { self.cwnd.get() }
     fn watch_cwnd(&self) -> (u32, WatchFuture<'_, u32>) { self.cwnd.watch() }
+
+    fn on_cwnd_check_before_send(&self, _sender: &Sender) {
+        let long_time_since_send = self.last_send_time.get().duration_since(Instant::now()) > self.rtt_at_last_send.get();
+        if long_time_since_send {
+            let restart_window = min(self.initial_cwnd, self.cwnd.get());
+            self.cwnd.set(restart_window);
+        }
+    }
+
+    fn on_send(&self, sender: &Sender) {
+        self.last_send_time.set(Instant::now());
+        self.rtt_at_last_send.set(sender.current_rto())
+    }
 
     fn on_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber) {
         let bytes_acknowledged = ack_seq_no - sender.base_seq_no.get();

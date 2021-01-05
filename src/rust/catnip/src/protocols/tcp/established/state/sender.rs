@@ -123,16 +123,22 @@ impl Sender {
         let win_sz = self.window_size.get();
         let base_seq = self.base_seq_no.get();
         let sent_seq = self.sent_seq_no.get();
-        let cwnd = self.congestion_ctrl.get_cwnd();
         let Wrapping(sent_data) = sent_seq - base_seq;
-
+        
         // Fast path: Try to send the data immediately.
         let in_flight_after_send = sent_data + buf_len;
+
+        // Before we get cwnd for the check, we prompt it to shrink it if the connection has been idle
+        self.congestion_ctrl.on_cwnd_check_before_send(&self);
+        let cwnd = self.congestion_ctrl.get_cwnd();
         // The limited transmit algorithm can increase the effective size of cwnd by up to 2MSS
         let effective_cwnd = cwnd + self.congestion_ctrl.get_limited_transmit_cwnd_increase();
 
         if win_sz > 0 && win_sz >= in_flight_after_send && effective_cwnd >= in_flight_after_send {
             if let Some(remote_link_addr) = cb.arp.try_query(cb.remote.address()) {
+                // This hook is primarily intended to record the last time we sent data, so we can later tell if the connection has been idle
+                self.congestion_ctrl.on_send(&self);
+
                 let mut header = cb.tcp_header();
                 header.seq_num = sent_seq;
                 cb.emit(header, buf.clone(), remote_link_addr);
