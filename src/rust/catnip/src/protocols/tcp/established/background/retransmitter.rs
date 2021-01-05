@@ -60,7 +60,7 @@ pub async fn retransmitter<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, F
 
         // I assume any change to the fast retransmit flag is an instruction to transmit, because I use `set_without_notify` to change it
         // back to false (which I am acutely aware is hack...).
-        let (_rtx_fast_retransmit, rtx_fast_retransmit_changed) = cb.sender.congestion_ctrl.fast_retransmit_now.watch();
+        let (_rtx_fast_retransmit, rtx_fast_retransmit_changed) = cb.sender.congestion_ctrl.watch_retransmit_now_flag();
         futures::pin_mut!(rtx_fast_retransmit_changed);
 
         let rtx_future = match rtx_deadline {
@@ -71,13 +71,11 @@ pub async fn retransmitter<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, F
         futures::select_biased! {
             _ = rtx_deadline_changed => continue,
             _ = rtx_future => {
-                // NOTE: Congestion control
-                // On retransmit time out, we update `recover` and exit fast recovery (if we're in it) by setting `duplicate_ack_count` to 0
-                cb.sender.congestion_ctrl.algorithm.on_rto(&cb.sender);
+                cb.sender.congestion_ctrl.on_rto(&cb.sender);
                 retransmit(RetransmitCause::TimeOut, &cb).await?;
             },
             _ = rtx_fast_retransmit_changed => {
-                cb.sender.congestion_ctrl.algorithm.on_fast_retransmit(&cb.sender);
+                cb.sender.congestion_ctrl.on_fast_retransmit(&cb.sender);
                 retransmit(RetransmitCause::FastRetransmit, &cb).await?;
             }
         }

@@ -80,7 +80,7 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         let (base_seq, base_seq_changed) = cb.sender.base_seq_no.watch();
         futures::pin_mut!(base_seq_changed);
 
-        let (cwnd, cwnd_changed) = cb.sender.congestion_ctrl.cwnd.watch();
+        let (cwnd, cwnd_changed) = cb.sender.congestion_ctrl.watch_cwnd();
         futures::pin_mut!(cwnd_changed);
 
         let Wrapping(sent_data) = sent_seq - base_seq;
