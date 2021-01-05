@@ -88,11 +88,11 @@ pub struct Cubic {
     pub w_max: Cell<u32>,           // The size of cwnd before the previous congestion event
 
     // Fast Recovery / Fast Retransmit State
-    pub in_fast_recovery: Cell<bool>,               // Are we currently in the `fast recovery` algorithm
-    pub fast_retransmit_now: WatchedValue<bool>,    // Flag to cause the retransmitter to retransmit a segment now
-    pub recover: Cell<SeqNumber>,                   // If we receive dup ACKs with sequence numbers greater than this we'll attempt fast recovery
-    pub prev_ack_seq_no: Cell<SeqNumber>,           // The previous highest ACK sequence number
     pub duplicate_ack_count: Cell<u32>,             // The number of consecutive duplicate ACKs we've received
+    pub fast_retransmit_now: WatchedValue<bool>,    // Flag to cause the retransmitter to retransmit a segment now
+    pub in_fast_recovery: Cell<bool>,               // Are we currently in the `fast recovery` algorithm
+    pub prev_ack_seq_no: Cell<SeqNumber>,           // The previous highest ACK sequence number
+    pub recover: Cell<SeqNumber>,                   // If we receive dup ACKs with sequence numbers greater than this we'll attempt fast recovery
     
     pub limited_transmit_cwnd_increase: WatchedValue<u32>, // The amount by which cwnd should be increased due to the limited transit algorithm
 }
@@ -108,17 +108,18 @@ impl CongestionControl for Cubic {
         };
         Self {
             mss,
-            cwnd: WatchedValue::new(initial_cwnd),
-            ssthresh: Cell::new(u32::MAX), // According to RFC5681 ssthresh should be initialised 'arbitrarily high'
+            // Slow Start / Congestion Avoidance State
             ca_start: Cell::new(Instant::now()), // record the start time of the congestion avoidance period
-            w_max: Cell::new(0), // Because ssthresh is u32::MAX, this will be set appropriately during the 1st congestion event
+            cwnd: WatchedValue::new(initial_cwnd),
+            fast_convergence: true,     // TODO: Congestion Control Need to get this value from config...
             retransmitted_packets_in_flight: Cell::new(0),
+            ssthresh: Cell::new(u32::MAX), // According to RFC5681 ssthresh should be initialised 'arbitrarily high'
+            w_max: Cell::new(0), // Because ssthresh is u32::MAX, this will be set appropriately during the 1st congestion event
             last_congestion_was_rto: Cell::new(false),
 
             in_fast_recovery: Cell::new(false),
             fast_retransmit_now: WatchedValue::new(false),
             recover: Cell::new(seq_no), // Recover set to initial send sequence number according to RFC6582
-            fast_convergence: true,     // TODO: Congestion Control Need to get this value from config...
             prev_ack_seq_no: Cell::new(seq_no), // RFC6582 doesn't specify the initial value, but this seems sensible
             duplicate_ack_count: Cell::new(0),
 
@@ -260,7 +261,7 @@ impl Cubic {
         } else {
             // Congestion avoidance
             let t = self.ca_start.get().elapsed().as_secs_f32();
-            let rtt = sender.rto.borrow().estimate().as_secs_f32();
+            let rtt = sender.current_rto().as_secs_f32();
             let mss_f32 = mss as f32;
             let k = self.k(mss_f32);
             let w_est = self.w_est(t, rtt, mss_f32);
