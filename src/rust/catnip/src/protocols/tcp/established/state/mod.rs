@@ -1,4 +1,4 @@
-pub mod congestion_control;
+pub mod congestion_ctrl;
 pub mod receiver;
 mod rto;
 pub mod sender;

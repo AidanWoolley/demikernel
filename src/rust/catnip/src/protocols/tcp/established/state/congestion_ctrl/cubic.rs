@@ -1,142 +1,23 @@
-use super::sender::Sender;
+use super::{
+    CongestionControl,
+    Options,
+    SlowStartCongestionAvoidance,
+    FastRetransmitRecovery,
+    LimitedTransmit,
+};
+use super::super::sender::Sender;
 use crate::{
     collections::watched::{WatchedValue, WatchFuture},
     protocols::tcp::SeqNumber,
 };
 use std::{
     cell::Cell,
-    collections::HashMap,
     cmp::{max, min},
     convert::TryInto,
     fmt::Debug,
     num::Wrapping,
     time::{Duration, Instant},
 };
-
-pub trait SlowStartCongestionAvoidanceAlgorithm { 
-    fn get_cwnd(&self) -> u32 { u32::MAX }
-    fn watch_cwnd(&self) -> (u32,  WatchFuture<'_, u32>);
-
-    // Called immediately before the cwnd check is performed before data is sent
-    fn on_cwnd_check_before_send(&self, _sender: &Sender) {}
-
-    fn on_ack_received(&self, _sender: &Sender, _ack_seq_no: SeqNumber) {}
-    
-    // Called immediately before retransmit after RTO
-    fn on_rto(&self, _sender: &Sender) {}
-
-    // Called immediately before a segment is sent for the 1st time
-    fn on_send(&self, _sender: &Sender) {}
-}
-
-pub trait FastRetransmitRecoveryAlgorithm where Self: SlowStartCongestionAvoidanceAlgorithm {
-    fn get_duplicate_ack_count(&self) -> u32 { 0 }
-
-    fn get_retransmit_now_flag(&self) -> bool { false }
-    fn watch_retransmit_now_flag(&self) -> (bool, WatchFuture<'_, bool>);
-
-    fn on_fast_retransmit(&self, _sender: &Sender) {}
-    fn on_base_seq_no_wraparound(&self, _sender: &Sender) {}
-}
-
-pub trait LimitedTransmitAlgorithm where Self: SlowStartCongestionAvoidanceAlgorithm {
-    fn get_limited_transmit_cwnd_increase(&self) -> u32 { 0 }
-    fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>);
-} 
-
-#[derive(Clone, Debug)]
-pub enum CongestionControlOptionValue {
-    Bool(bool),
-    Float(f64),
-    Int(i64),
-    String(String),
-}
-
-pub type CongestionControlOptions = HashMap<String, CongestionControlOptionValue>;
-
-pub trait TCongestionControlOptions {
-    fn get_bool(&self, key: &str) -> Option<bool>;
-    fn get_float(&self, key: &str) -> Option<f64>;
-    fn get_int(&self, key: &str) -> Option<i64>;
-    fn get_string(&self, key: &str) -> Option<String>;
-}
-
-impl TCongestionControlOptions for CongestionControlOptions {
-    fn get_bool(&self, key: &str) -> Option<bool> {
-        self.get(key).map(
-            |v| match v {
-                CongestionControlOptionValue::Bool(b) => *b,
-                _ => panic!("Value for {} should be a bool", key)
-            }
-        )
-    }
-
-    fn get_float(&self, key: &str) -> Option<f64> {
-        self.get(key).map(
-            |v| match v {
-                CongestionControlOptionValue::Float(f) => *f,
-                _ => panic!("Value for {} should be a float", key)
-            }
-        )
-    }
-
-    fn get_int(&self, key: &str) -> Option<i64> {
-        self.get(key).map(
-            |v| match v {
-                CongestionControlOptionValue::Int(i) => *i,
-                _ => panic!("Value for {} should be an int", key)
-            }
-        )
-    }
-
-    fn get_string(&self, key: &str) -> Option<String> {
-        self.get(key).map(
-            |v| match v {
-                CongestionControlOptionValue::String(s) => s.clone(),
-                _ => panic!("Value for {} should be a string", key)
-            }
-        )
-    }
-}
-
-pub trait CongestionControl: SlowStartCongestionAvoidanceAlgorithm +
-                             FastRetransmitRecoveryAlgorithm +
-                             LimitedTransmitAlgorithm +
-                             Debug {
-    fn new(mss: usize, seq_no: SeqNumber, options: Option<CongestionControlOptions>) -> Self where Self: Sized;
-}
-
-// Implementation of congestion control which does nothing.
-#[derive(Debug)]
-pub struct NoCongestionControl {
-    // TODO: CongestionControl      Priority: Low
-    // Work out how to construct a WatchFuture which is always pending so I can get rid of these values 
-    cwnd: WatchedValue<u32>,
-    retransmit_now: WatchedValue<bool>,
-    limited_transmit_cwnd_increase: WatchedValue<u32>,
-}
-
-impl CongestionControl for NoCongestionControl {
-    fn new(_mss: usize, _seq_no: SeqNumber, _options: Option<CongestionControlOptions>) -> Self {
-        Self {
-            cwnd: WatchedValue::new(u32::MAX),
-            retransmit_now: WatchedValue::new(false),
-            limited_transmit_cwnd_increase: WatchedValue::new(0),
-        }
-    }
-}
-
-impl SlowStartCongestionAvoidanceAlgorithm for NoCongestionControl {
-    fn watch_cwnd(&self) -> (u32, WatchFuture<'_, u32>) { self.cwnd.watch() }
-}
-
-impl FastRetransmitRecoveryAlgorithm for NoCongestionControl {
-    fn watch_retransmit_now_flag(&self) -> (bool, WatchFuture<'_, bool>) { self.retransmit_now.watch() }
-}
-
-impl LimitedTransmitAlgorithm for NoCongestionControl {
-    fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>) { self.limited_transmit_cwnd_increase.watch() }
-}
 
 #[derive(Debug)]
 pub struct Cubic {
@@ -164,7 +45,7 @@ pub struct Cubic {
 }
 
 impl CongestionControl for Cubic {
-    fn new(mss: usize, seq_no: SeqNumber, options: Option<CongestionControlOptions>) -> Self {
+    fn new(mss: usize, seq_no: SeqNumber, options: Option<Options>) -> Self {
         let mss: u32 = mss.try_into().unwrap();
         // The initial value of cwnd is set according to RFC5681, section 3.1, page 7
         let initial_cwnd = match mss {
@@ -173,7 +54,7 @@ impl CongestionControl for Cubic {
             _ => 2 * mss
         };
         
-        let options: CongestionControlOptions = options.unwrap_or_default();
+        let options: Options = options.unwrap_or_default();
         let fast_convergence = options.get_bool("fast_convergence").unwrap_or(true);
 
         Self {
@@ -381,7 +262,7 @@ impl Cubic {
     }
 }
 
-impl SlowStartCongestionAvoidanceAlgorithm for Cubic {
+impl SlowStartCongestionAvoidance for Cubic {
     fn get_cwnd(&self) -> u32 { self.cwnd.get() }
     fn watch_cwnd(&self) -> (u32, WatchFuture<'_, u32>) { self.cwnd.watch() }
 
@@ -426,7 +307,7 @@ impl SlowStartCongestionAvoidanceAlgorithm for Cubic {
     }
 }
 
-impl FastRetransmitRecoveryAlgorithm for Cubic {
+impl FastRetransmitRecovery for Cubic {
     fn get_duplicate_ack_count(&self) -> u32 { self.duplicate_ack_count.get() }
 
     fn get_retransmit_now_flag(&self) -> bool { self.fast_retransmit_now.get() }
@@ -445,7 +326,7 @@ impl FastRetransmitRecoveryAlgorithm for Cubic {
     }
 }
 
-impl LimitedTransmitAlgorithm for Cubic {
+impl LimitedTransmit for Cubic {
     fn get_limited_transmit_cwnd_increase(&self) -> u32 { self.limited_transmit_cwnd_increase.get() }
     fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>) { self.limited_transmit_cwnd_increase.watch() }
 }

@@ -1,17 +1,14 @@
 use super::{
     rto::RtoCalculator,
-    congestion_control::{
-        CongestionControl,
-        NoCongestionControl,
-        Cubic,
-        CongestionControlOptions,
-    }
+    congestion_ctrl::{
+        self as cc,
+        CongestionControl
+    },
 };
 use crate::{
     collections::watched::WatchedValue,
     fail::Fail,
     protocols::tcp::SeqNumber,
-    protocols::tcp::options::TcpCongestionControlType,
     sync::Bytes,
 };
 use std::{
@@ -71,7 +68,7 @@ pub struct Sender {
     pub retransmit_deadline: WatchedValue<Option<Instant>>,
     pub rto: RefCell<RtoCalculator>,
 
-    pub congestion_ctrl: Box<dyn CongestionControl>,
+    pub congestion_ctrl: Box<dyn cc::CongestionControl>,
 }
 
 impl fmt::Debug for Sender {
@@ -90,10 +87,10 @@ impl fmt::Debug for Sender {
 }
 
 impl Sender {
-    pub fn new(seq_no: SeqNumber, window_size: u32, window_scale: u8, mss: usize, congestion_ctrl_type: TcpCongestionControlType, congestion_control_options: Option<CongestionControlOptions>) -> Self {
-        let congestion_ctrl: Box<dyn CongestionControl> = match congestion_ctrl_type {
-            TcpCongestionControlType::None => Box::new(NoCongestionControl::new(mss, seq_no, congestion_control_options)),
-            TcpCongestionControlType::Cubic => Box::new(Cubic::new(mss, seq_no, congestion_control_options)),
+    pub fn new(seq_no: SeqNumber, window_size: u32, window_scale: u8, mss: usize, congestion_ctrl_type: cc::Type, congestion_control_options: Option<cc::Options>) -> Self {
+        let congestion_ctrl: Box<dyn cc::CongestionControl> = match congestion_ctrl_type {
+            cc::Type::None => Box::new(cc::None::new(mss, seq_no, congestion_control_options)),
+            cc::Type::Cubic => Box::new(cc::Cubic::new(mss, seq_no, congestion_control_options)),
         }; 
         Self {
             state: WatchedValue::new(SenderState::Open),
