@@ -5,6 +5,7 @@ use crate::{
 };
 use std::{
     cell::Cell,
+    collections::HashMap,
     cmp::{max, min},
     convert::TryInto,
     fmt::Debug,
@@ -43,11 +44,66 @@ pub trait LimitedTransmitAlgorithm where Self: SlowStartCongestionAvoidanceAlgor
     fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>);
 } 
 
+#[derive(Clone, Debug)]
+pub enum CongestionControlOptionValue {
+    Bool(bool),
+    Float(f64),
+    Int(i64),
+    String(String),
+}
+
+pub type CongestionControlOptions = HashMap<String, CongestionControlOptionValue>;
+
+pub trait TCongestionControlOptions {
+    fn get_bool(&self, key: &str) -> Option<bool>;
+    fn get_float(&self, key: &str) -> Option<f64>;
+    fn get_int(&self, key: &str) -> Option<i64>;
+    fn get_string(&self, key: &str) -> Option<String>;
+}
+
+impl TCongestionControlOptions for CongestionControlOptions {
+    fn get_bool(&self, key: &str) -> Option<bool> {
+        self.get(key).map(
+            |v| match v {
+                CongestionControlOptionValue::Bool(b) => *b,
+                _ => panic!("Value for {} should be a bool", key)
+            }
+        )
+    }
+
+    fn get_float(&self, key: &str) -> Option<f64> {
+        self.get(key).map(
+            |v| match v {
+                CongestionControlOptionValue::Float(f) => *f,
+                _ => panic!("Value for {} should be a float", key)
+            }
+        )
+    }
+
+    fn get_int(&self, key: &str) -> Option<i64> {
+        self.get(key).map(
+            |v| match v {
+                CongestionControlOptionValue::Int(i) => *i,
+                _ => panic!("Value for {} should be an int", key)
+            }
+        )
+    }
+
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.get(key).map(
+            |v| match v {
+                CongestionControlOptionValue::String(s) => s.clone(),
+                _ => panic!("Value for {} should be a string", key)
+            }
+        )
+    }
+}
+
 pub trait CongestionControl: SlowStartCongestionAvoidanceAlgorithm +
                              FastRetransmitRecoveryAlgorithm +
                              LimitedTransmitAlgorithm +
                              Debug {
-    fn new(mss: usize, seq_no: SeqNumber) -> Self where Self: Sized;
+    fn new(mss: usize, seq_no: SeqNumber, options: Option<CongestionControlOptions>) -> Self where Self: Sized;
 }
 
 // Implementation of congestion control which does nothing.
@@ -61,7 +117,7 @@ pub struct NoCongestionControl {
 }
 
 impl CongestionControl for NoCongestionControl {
-    fn new(_mss: usize, _seq_no: SeqNumber) -> Self {
+    fn new(_mss: usize, _seq_no: SeqNumber, _options: Option<CongestionControlOptions>) -> Self {
         Self {
             cwnd: WatchedValue::new(u32::MAX),
             retransmit_now: WatchedValue::new(false),
@@ -108,7 +164,7 @@ pub struct Cubic {
 }
 
 impl CongestionControl for Cubic {
-    fn new(mss: usize, seq_no: SeqNumber) -> Self {
+    fn new(mss: usize, seq_no: SeqNumber, options: Option<CongestionControlOptions>) -> Self {
         let mss: u32 = mss.try_into().unwrap();
         // The initial value of cwnd is set according to RFC5681, section 3.1, page 7
         let initial_cwnd = match mss {
@@ -116,12 +172,16 @@ impl CongestionControl for Cubic {
             1096..=2190 => 3 * mss,
             _ => 2 * mss
         };
+        
+        let options: CongestionControlOptions = options.unwrap_or_default();
+        let fast_convergence = options.get_bool("fast_convergence").unwrap_or(true);
+
         Self {
             mss,
             // Slow Start / Congestion Avoidance State
             ca_start: Cell::new(Instant::now()), // record the start time of the congestion avoidance period
             cwnd: WatchedValue::new(initial_cwnd),
-            fast_convergence: true,     // TODO: Congestion Control Need to get this value from config...
+            fast_convergence,
             initial_cwnd,
             last_send_time: Cell::new(Instant::now()),
             retransmitted_packets_in_flight: Cell::new(0),

@@ -1,9 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
-use crate::protocols::tcp::constants::{
-    DEFAULT_MSS,
-    MAX_MSS,
-    MIN_MSS,
+use crate::protocols::tcp::{
+    constants::{
+        DEFAULT_MSS,
+        MAX_MSS,
+        MIN_MSS,
+    },
+    established::state::congestion_control::CongestionControlOptions,
 };
 use std::time::Duration;
 
@@ -17,6 +20,7 @@ pub enum TcpCongestionControlType {
 pub struct TcpOptions {
     pub advertised_mss: usize,
     pub congestion_ctrl_type: TcpCongestionControlType,
+    pub congestion_ctrl_options: Option<CongestionControlOptions>,
     pub handshake_retries: usize,
     pub handshake_timeout: Duration,
     pub receive_window_size: usize,
@@ -29,6 +33,7 @@ impl Default for TcpOptions {
         TcpOptions {
             advertised_mss: DEFAULT_MSS,
             congestion_ctrl_type: TcpCongestionControlType::Cubic,
+            congestion_ctrl_options: None,
             handshake_retries: 5,
             handshake_timeout: Duration::from_secs(3),
             receive_window_size: 0xffff,
@@ -48,6 +53,11 @@ impl TcpOptions {
 
     pub fn congestion_ctrl_type(mut self, value: TcpCongestionControlType) -> Self {
         self.congestion_ctrl_type = value;
+        self
+    }
+
+    pub fn congestion_control_options(mut self, value: CongestionControlOptions) -> Self {
+        self.congestion_ctrl_options = Some(value);
         self
     }
 
