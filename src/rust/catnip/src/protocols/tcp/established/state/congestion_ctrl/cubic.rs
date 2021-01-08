@@ -267,7 +267,7 @@ impl SlowStartCongestionAvoidance for Cubic {
     fn watch_cwnd(&self) -> (u32, WatchFuture<'_, u32>) { self.cwnd.watch() }
 
     fn on_cwnd_check_before_send(&self, _sender: &Sender) {
-        let long_time_since_send = self.last_send_time.get().duration_since(Instant::now()) > self.rtt_at_last_send.get();
+        let long_time_since_send = Instant::now().duration_since(self.last_send_time.get()) > self.rtt_at_last_send.get();
         if long_time_since_send {
             let restart_window = min(self.initial_cwnd, self.cwnd.get());
             self.cwnd.set(restart_window);
