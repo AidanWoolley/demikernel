@@ -33,8 +33,7 @@ pub async fn retransmit<RT: Runtime>(cause: RetransmitCause, cb: &Rc<ControlBloc
 
     // TODO: Repacketization
 
-    // TODO: Congestion control
-    // NOTE: Don't think we record a failure on Fast Retransmit, but can't find a definitive source.
+    // NOTE: Congestion Control Don't think we record a failure on Fast Retransmit, but can't find a definitive source.
     match cause {
         RetransmitCause::TimeOut => rto.record_failure(),
         RetransmitCause::FastRetransmit => ()
