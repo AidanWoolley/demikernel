@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "alice",
+    "bob",
+    "mininet-runtime"
+]
