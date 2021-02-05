@@ -44,11 +44,10 @@ use socket2::*;
 use std::{
     cell::RefCell,
     convert::TryInto,
-    ffi::CString,
     fs,
     future::Future,
-    mem::{size_of, transmute},
-    net::{Ipv4Addr, SocketAddrV4},
+    mem,
+    net::Ipv4Addr,
     rc::Rc,
     time::{
         Duration,
@@ -63,6 +62,7 @@ pub const ALICE_IPV4: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 pub const BOB_MAC: MacAddress = MacAddress::new([0x12, 0x23, 0x45, 0x67, 0x89, 0xb0]);
 pub const BOB_IPV4: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
 pub const PORT_NO: u16 = 8000;
+pub const ETH_P_ALL: u16 = (libc::ETH_P_ALL as u16).to_be();
 
 #[derive(Clone)]
 pub struct MininetRuntime {
@@ -84,20 +84,33 @@ impl MininetRuntime {
         arp_options.initial_values.insert(ALICE_MAC, ALICE_IPV4);
         arp_options.initial_values.insert(BOB_MAC, BOB_IPV4);
 
-        let send_socket = Socket::new(Domain::packet(), Type::raw(), Some((libc::IPPROTO_RAW).to_be().into())).unwrap();
-        send_socket.bind_device(Some(&CString::new(format!("{}-eth0", name)).unwrap())).unwrap();
-        
-        let recv_socket = Socket::new(Domain::packet(), Type::raw(), Some((libc::ETH_P_ALL).to_be().into())).unwrap();
-        recv_socket.set_reuse_address(true).unwrap();
-        recv_socket.bind_device(Some(&CString::new(format!("{}-eth0", name)).unwrap())).unwrap();
-
+        let socket = Socket::new(Domain::packet(), Type::raw(), Some((ETH_P_ALL as libc::c_int).into())).unwrap();
+        socket.set_read_timeout(Some(Duration::new(0, 1000000))).unwrap();
         let ifindex: i32 = fs::read_to_string(format!("/sys/class/net/{}-eth0/ifindex", name)).expect("Could not read ifindex").trim().parse().unwrap();
+
+        let bind_sockaddr_ll = libc::sockaddr_ll {
+            sll_family: libc::AF_PACKET.try_into().unwrap(),
+            sll_protocol: ETH_P_ALL,
+            sll_ifindex: ifindex,
+            sll_hatype: 0,
+            sll_pkttype: 0,
+            sll_halen: 0,
+            sll_addr: [0; 8],
+    
+        };
+        let bind_sockaddr_ll_ptr: *const libc::sockaddr_ll = &bind_sockaddr_ll;
+        let bind_sockaddr;
+        unsafe {
+            let bind_sockaddr_ptr = mem::transmute::<*const libc::sockaddr_ll, *const libc::sockaddr>(bind_sockaddr_ll_ptr);
+            bind_sockaddr = SockAddr::from_raw_parts(bind_sockaddr_ptr, mem::size_of::<libc::sockaddr_ll>().try_into().unwrap());
+        }
+        socket.bind(&bind_sockaddr).unwrap();
+
 
         let inner = Inner {
             timer: TimerRc(Rc::new(Timer::new(now))),
             rng: SmallRng::from_seed([0; 16]),
-            send_socket,
-            recv_socket,
+            socket,
             link_addr,
             ipv4_addr,
             ifindex,
@@ -119,8 +132,7 @@ impl MininetRuntime {
 struct Inner {
     timer: TimerRc,
     rng: SmallRng,
-    send_socket: Socket,
-    recv_socket: Socket,
+    socket: Socket,
     link_addr: MacAddress,
     ipv4_addr: Ipv4Addr,
     ifindex: i32,
@@ -133,7 +145,6 @@ impl Runtime for MininetRuntime {
 
     #[allow(unused)]
     fn transmit(&self, pkt: impl PacketBuf) {
-        println!("In transmit!");
         let size = pkt.compute_size();
         let mut buf = BytesMut::zeroed(size);
         pkt.serialize(&mut buf[..]);
@@ -154,22 +165,20 @@ impl Runtime for MininetRuntime {
 
         let dest_addr;
         unsafe {
-            let dest_addr_ptr = transmute::<*const libc::sockaddr_ll, *const libc::sockaddr>(dest_addr_ll_ptr);
-            dest_addr = SockAddr::from_raw_parts(dest_addr_ptr, size_of::<libc::sockaddr_ll>().try_into().unwrap());
+            let dest_addr_ptr = mem::transmute::<*const libc::sockaddr_ll, *const libc::sockaddr>(dest_addr_ll_ptr);
+            dest_addr = SockAddr::from_raw_parts(dest_addr_ptr, mem::size_of::<libc::sockaddr_ll>().try_into().unwrap());
         }
 
-        let res = self.inner.borrow().send_socket.send_to(&buf, &dest_addr);
-        println!("Transmit Result: {:?}", res);
+        self.inner.borrow().socket.send_to(&buf, &dest_addr).unwrap();
     }
 
     fn receive(&self) -> Option<Bytes> {
-        println!("In Receive!");
         // I really hope recv_from never gives me more than 1 packet or I'll need to work out something clever
-        let mut buf = BytesMut::zeroed(10240);
-        let read_result = self.inner.borrow().recv_socket.recv_from(&mut buf[..]);
+        let mut buf = BytesMut::zeroed(4096);
+        let read_result = self.inner.borrow().socket.recv_from(&mut buf[..]);
 
         match read_result {
-            Ok((received_size, _origin)) => {println!("Received some bytes"); Some(BytesMut::from(&buf[..received_size]).freeze())},
+            Ok((received_size, _origin)) => Some(BytesMut::from(&buf[..received_size]).freeze()),
             Err(_) => None,
         }
 

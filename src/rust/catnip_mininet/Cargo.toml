@@ -3,5 +3,6 @@
 members = [
     "alice",
     "bob",
-    "mininet-runtime"
+    "mininet-runtime",
+    "raw_sock_test",
 ]

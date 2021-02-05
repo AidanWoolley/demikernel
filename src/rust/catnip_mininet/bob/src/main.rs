@@ -39,7 +39,6 @@ fn main() {
     loop {
         bob.rt().poll_scheduler();
         if let Some(data) = bob.rt().receive() {
-            println!("Received some data!");
             bob.receive(data).unwrap();
         }
         match Future::poll(Pin::new(&mut accept_future), &mut ctx) {
