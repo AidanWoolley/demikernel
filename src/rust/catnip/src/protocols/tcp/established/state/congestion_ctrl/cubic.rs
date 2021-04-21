@@ -240,7 +240,7 @@ impl Cubic {
         self.cwnd.set(((cwnd as f32) * Self::BETA_CUBIC) as u32);
 
         let rpif = self.retransmitted_packets_in_flight.get();
-        if rpif == 0{
+        if rpif == 0 {
             // If we lost a retransmitted packet, we don't shrink ssthresh.
             // So we have to check if a retransmitted packet was in flight before we shrink it.
             self.ssthresh.set(max((cwnd as f32 * Self::BETA_CUBIC) as u32, 2 * self.mss));
@@ -284,11 +284,12 @@ impl SlowStartCongestionAvoidance for Cubic {
         if bytes_acknowledged.0 == 0 {
             // ACK is a duplicate
             self.on_dup_ack_received(sender, ack_seq_no);
+            self.retransmitted_packets_in_flight.set(self.retransmitted_packets_in_flight.get() - 1);
         } else {
+            assert_eq!(self.retransmitted_packets_in_flight.get(), 0);
             self.duplicate_ack_count.set(0);
             self.calculate_limited_transmit_cwnd_increase();
 
-            self.retransmitted_packets_in_flight.set(self.retransmitted_packets_in_flight.get() - 1);
             if self.in_fast_recovery.get() {
                 // Fast Recovery response to new data
                 self.on_ack_received_fast_recovery(sender, ack_seq_no);
