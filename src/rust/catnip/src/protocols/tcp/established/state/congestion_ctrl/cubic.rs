@@ -286,7 +286,6 @@ impl SlowStartCongestionAvoidance for Cubic {
             self.on_dup_ack_received(sender, ack_seq_no);
             self.retransmitted_packets_in_flight.set(self.retransmitted_packets_in_flight.get() - 1);
         } else {
-            assert_eq!(self.retransmitted_packets_in_flight.get(), 0);
             self.duplicate_ack_count.set(0);
             self.calculate_limited_transmit_cwnd_increase();
 
