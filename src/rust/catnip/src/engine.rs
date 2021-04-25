@@ -46,7 +46,7 @@ use hashbrown::HashMap;
 pub struct Engine<RT: Runtime> {
     rt: RT,
     arp: arp::Peer<RT>,
-    ipv4: ipv4::Peer<RT>,
+    pub ipv4: ipv4::Peer<RT>,
 
     file_table: FileTable,
 }

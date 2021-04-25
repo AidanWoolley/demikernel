@@ -9,6 +9,7 @@ use crate::{
         OperationResult,
         ResultFuture,
     },
+    protocols::tcp::established::state::ControlBlock,
     runtime::Runtime,
     sync::Bytes,
 };
@@ -75,7 +76,7 @@ impl<RT: Runtime> TcpOperation<RT> {
         match self {
             Connect(ResultFuture {
                 future,
-                done: Some(Ok(())),
+                done: Some(Ok(_)),
             }) => (future.fd, OperationResult::Connect),
             Connect(ResultFuture {
                 future,
@@ -84,7 +85,7 @@ impl<RT: Runtime> TcpOperation<RT> {
 
             Accept(ResultFuture {
                 future,
-                done: Some(Ok(fd)),
+                done: Some(Ok((fd, _))),
             }) => (future.fd, OperationResult::Accept(fd)),
             Accept(ResultFuture {
                 future,
@@ -132,7 +133,7 @@ impl<RT: Runtime> fmt::Debug for ConnectFuture<RT> {
 }
 
 impl<RT: Runtime> Future for ConnectFuture<RT> {
-    type Output = Result<(), Fail>;
+    type Output = Result<Rc<ControlBlock<RT>>, Fail>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
         let self_ = self.get_mut();
@@ -158,7 +159,7 @@ impl<RT: Runtime> fmt::Debug for AcceptFuture<RT> {
 }
 
 impl<RT: Runtime> Future for AcceptFuture<RT> {
-    type Output = Result<FileDescriptor, Fail>;
+    type Output = Result<(FileDescriptor, Rc<ControlBlock<RT>>), Fail>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
         let self_ = self.get_mut();
