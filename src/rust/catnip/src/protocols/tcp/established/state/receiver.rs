@@ -5,7 +5,7 @@ use crate::{
     sync::Bytes,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::VecDeque,
     num::Wrapping,
     task::{
@@ -40,6 +40,7 @@ pub struct Receiver {
     pub recv_queue: RefCell<VecDeque<Bytes>>,
     pub ack_seq_no: WatchedValue<SeqNumber>,
     pub recv_seq_no: WatchedValue<SeqNumber>,
+    pub available: Cell<usize>,
 
     pub ack_deadline: WatchedValue<Option<Instant>>,
 
@@ -56,6 +57,7 @@ impl Receiver {
             recv_queue: RefCell::new(VecDeque::new()),
             ack_seq_no: WatchedValue::new(seq_no),
             recv_seq_no: WatchedValue::new(seq_no),
+            available: Cell::new(0),
             ack_deadline: WatchedValue::new(None),
             max_window_size,
             waker: RefCell::new(None),
@@ -122,7 +124,7 @@ impl Receiver {
             .expect("recv_seq > base_seq without data in queue?");
         self.base_seq_no
             .modify(|b| b + Wrapping(segment.len() as u32));
-
+            self.available.set(self.available.get() - segment.len());
         Ok(Some(segment))
     }
 
@@ -144,7 +146,7 @@ impl Receiver {
             .expect("recv_seq > base_seq without data in queue?");
         self.base_seq_no
             .modify(|b| b + Wrapping(segment.len() as u32));
-
+        self.available.set(self.available.get() - segment.len());
         Poll::Ready(Ok(segment))
     }
 
@@ -179,6 +181,7 @@ impl Receiver {
         }
 
         self.recv_seq_no.modify(|r| r + Wrapping(buf.len() as u32));
+        self.available.set(self.available.get() + buf.len());
         self.recv_queue.borrow_mut().push_back(buf);
         self.waker.borrow_mut().take().map(|w| w.wake());
 
@@ -186,7 +189,7 @@ impl Receiver {
         if self.ack_deadline.get().is_none() {
             // TODO: Configure this value (and also maybe just have an RT pointer here.)
             self.ack_deadline
-                .set(Some(now + Duration::from_millis(500)));
+                .set(Some(now + Duration::from_millis(1)));
         }
 
         Ok(())
