@@ -10,7 +10,7 @@ use crate::protocols::tcp::{
 };
 use std::time::Duration;
 
-
+pub use crate::protocols::tcp::established::state::congestion_ctrl::Type as CongestionControlType;
 
 #[derive(Clone, Debug)]
 pub struct TcpOptions {

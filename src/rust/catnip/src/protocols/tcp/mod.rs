@@ -17,5 +17,6 @@ pub type SeqNumber = Wrapping<u32>;
 
 pub use self::{
     options::TcpOptions as Options,
+    options::CongestionControlType,
     peer::Peer,
 };

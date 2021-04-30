@@ -67,32 +67,43 @@ fn main() {
     println!("Connection Established at Bob!! Bob_fd = {}", bob_fd);
     
     let mut total_received: usize = 0;
+    // let mut initial_seq_no = bob_cb.receiver.recv_seq_no.get();
+    println!(
+        "base_seq_no: {}, ack_seq_no: {}, recv_seq_no: {}",
+        bob_cb.receiver.base_seq_no.get(),
+        bob_cb.receiver.ack_seq_no.get(),
+        bob_cb.receiver.recv_seq_no.get()
+    );
     while total_received < TEST_DATA_LEN {
-        bob.rt().poll_scheduler();
         bob.rt().advance_clock(Instant::now());
+        bob.rt().poll_scheduler();
         if let Some(data) = bob.rt().receive() {
             match bob.receive(data) {
                 Ok(_) => (),
                 Err(fail) => println!("{}", fail.to_string()),
             }
         }
-        // if bob_cb.receiver.recv_seq_no.get() - bob_cb.receiver.base_seq_no.get() > Wrapping(60000) {
-            let mut pop_future = bob.tcp_pop(bob_fd);
-            match Future::poll(Pin::new(&mut pop_future), &mut ctx) {
-                Poll::Ready(Ok(bytes)) => {
-                    total_received += bytes.len();
-                    // println!("Received {} bytes. Total Received: {} bytes", bytes.len(), total_received);
-                },
-                Poll::Pending => (),
-                _ => panic!("Error receiving bytes")
-            };
-        // }
+        
+        let mut pop_future = bob.tcp_pop(bob_fd);
+        match Future::poll(Pin::new(&mut pop_future), &mut ctx) {
+            Poll::Ready(Ok(bytes)) => {
+                total_received += bytes.len();
+                // println!("Total Received Count: {} bytes, recv_seq_no: {}", total_received, bob_cb.receiver.recv_seq_no.get());
+            },
+            Poll::Pending => {
+                // println!("Data on queue: {}B", bob_cb.receiver.available.get());
+                ()
+            },
+            _ => panic!("Error receiving bytes")
+        };
     }
+
+    println!("Received {} bytes total", total_received);
 
     // Wait until the last ACK is sent to close the connection 
     while bob_cb.receiver.ack_deadline.get() != None {
         bob.rt().advance_clock(Instant::now());
         bob.rt().poll_scheduler();
-        sleep(Duration::from_millis(1));
+        sleep(Duration::from_millis(10));
     }
 }

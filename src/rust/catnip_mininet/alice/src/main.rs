@@ -23,6 +23,7 @@ fn main() {
     let mut ctx = Context::from_waker(noop_waker_ref());
     // Create alice engine to attempt socket connect and send data
     let mut alice = new_mininet_engine("alice", Instant::now(), ALICE_MAC, ALICE_IPV4);
+    
     println!("Created Alice");
 
     // Establish the connection between the two peers.
@@ -70,7 +71,9 @@ fn main() {
                 Ok(_) => (),
                 Err(fail) => println!("{}", fail.to_string()),
             }
+            println!("RTT Estimate {:?}", alice_cb.sender.rto.borrow().estimate());
         }
+
     }
 
     alice.tcp_close(alice_fd).unwrap();

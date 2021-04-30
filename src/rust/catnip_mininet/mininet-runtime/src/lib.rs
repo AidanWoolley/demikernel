@@ -63,7 +63,7 @@ pub const BOB_MAC: MacAddress = MacAddress::new([0x12, 0x23, 0x45, 0x67, 0x89, 0
 pub const BOB_IPV4: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
 pub const PORT_NO: u16 = 8000;
 pub const ETH_P_ALL: u16 = (libc::ETH_P_ALL as u16).to_be();
-pub const TEST_DATA_LEN: usize = 1<<20;
+pub const TEST_DATA_LEN: usize = 1<<30;
 
 #[derive(Clone)]
 pub struct MininetRuntime {
@@ -86,8 +86,11 @@ impl MininetRuntime {
         arp_options.initial_values.insert(BOB_MAC, BOB_IPV4);
 
         let socket = Socket::new(Domain::packet(), Type::raw(), Some((ETH_P_ALL as libc::c_int).into())).unwrap();
-        // Set the read timeout to 2us because 1us seems buggy and receive can't be async
-        socket.set_read_timeout(Some(Duration::from_micros(2))).unwrap();
+        // Set the read timeout to 1us which is the minimum possible as receive mustn't be async
+        socket.set_read_timeout(Some(Duration::from_micros(1))).unwrap();
+        // Don't want issues with receiving to the raw socket so increase its buffer size just in case
+        socket.set_recv_buffer_size(1<<20).unwrap();
+
         let ifindex: i32 = fs::read_to_string(format!("/sys/class/net/{}-eth0/ifindex", name)).expect("Could not read ifindex").trim().parse().unwrap();
 
         let bind_sockaddr_ll = libc::sockaddr_ll {
@@ -128,6 +131,10 @@ impl MininetRuntime {
     pub fn poll_scheduler(&self) {
         // let mut ctx = Context::from_waker(noop_waker_ref());
         self.scheduler.poll();
+    }
+
+    pub fn disable_congestion_control(&mut self) {
+        self.inner.borrow_mut().tcp_options.congestion_ctrl_type = tcp::CongestionControlType::None;
     }
 }
 
