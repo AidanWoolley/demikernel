@@ -1,6 +1,6 @@
 use super::sender::Sender;
 use crate::{
-    collections::watched::WatchFuture,
+    collections::watched::{WatchedValue, WatchFuture},
     protocols::tcp::SeqNumber,
 };
 use std::fmt::Debug;
@@ -17,6 +17,12 @@ pub use self::{
         Type,
     },
 };
+
+// TODO: Check if this actually works....
+// Try static instead of const maybe
+const watched_u32_max: WatchedValue<u32> = WatchedValue::new(u32::MAX);
+const watched_u32_0: WatchedValue<u32> = WatchedValue::new(0);
+const watched_false: WatchedValue<bool> = WatchedValue::new(false);
 
 pub trait SlowStartCongestionAvoidance { 
     fn get_cwnd(&self) -> u32 { u32::MAX }
@@ -49,9 +55,13 @@ pub trait LimitedTransmit where Self: SlowStartCongestionAvoidance {
     fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>);
 } 
 
+
 pub trait CongestionControl: SlowStartCongestionAvoidance +
                              FastRetransmitRecovery +
                              LimitedTransmit +
                              Debug {
-    fn new(mss: usize, seq_no: SeqNumber, options: Option<options::Options>) -> Self where Self: Sized;
+    // TODO: Explore passing the Sender constructor a function pointer of the correct type.
+    fn new(mss: usize, seq_no: SeqNumber, options: Option<options::Options>) -> Box<Self> where Self: Sized;
 }
+
+type CongestionControlConstructor = fn(usize, SeqNumber, Option<options::Options>) -> Box<dyn CongestionControl>;

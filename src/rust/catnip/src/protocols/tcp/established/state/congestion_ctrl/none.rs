@@ -16,6 +16,7 @@ use std::fmt::Debug;
 pub struct None {
     // TODO: CongestionControl      Priority: Low
     // Work out how to construct a WatchFuture which is always pending so I can get rid of these values 
+    // Potentially have a few consts to watch to save space. Probably OK.
     cwnd: WatchedValue<u32>,
     retransmit_now: WatchedValue<bool>,
     limited_transmit_cwnd_increase: WatchedValue<u32>,
