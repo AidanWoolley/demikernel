@@ -1,6 +1,6 @@
 use super::sender::Sender;
 use crate::{
-    collections::watched::{WatchedValue, WatchFuture},
+    collections::watched::WatchFuture,
     protocols::tcp::SeqNumber,
 };
 use std::fmt::Debug;
@@ -18,15 +18,9 @@ pub use self::{
     },
 };
 
-// TODO: Check if this actually works....
-// Try static instead of const maybe
-const watched_u32_max: WatchedValue<u32> = WatchedValue::new(u32::MAX);
-const watched_u32_0: WatchedValue<u32> = WatchedValue::new(0);
-const watched_false: WatchedValue<bool> = WatchedValue::new(false);
-
 pub trait SlowStartCongestionAvoidance { 
     fn get_cwnd(&self) -> u32 { u32::MAX }
-    fn watch_cwnd(&self) -> (u32,  WatchFuture<'_, u32>);
+    fn watch_cwnd(&self) -> (u32,  WatchFuture<'_, u32>) { (u32::MAX, WatchFuture::Pending) }
 
     // Called immediately before the cwnd check is performed before data is sent
     fn on_cwnd_check_before_send(&self, _sender: &Sender) {}
@@ -44,7 +38,7 @@ pub trait FastRetransmitRecovery where Self: SlowStartCongestionAvoidance {
     fn get_duplicate_ack_count(&self) -> u32 { 0 }
 
     fn get_retransmit_now_flag(&self) -> bool { false }
-    fn watch_retransmit_now_flag(&self) -> (bool, WatchFuture<'_, bool>);
+    fn watch_retransmit_now_flag(&self) -> (bool, WatchFuture<'_, bool>) { (false, WatchFuture::Pending) }
 
     fn on_fast_retransmit(&self, _sender: &Sender) {}
     fn on_base_seq_no_wraparound(&self, _sender: &Sender) {}
@@ -52,7 +46,7 @@ pub trait FastRetransmitRecovery where Self: SlowStartCongestionAvoidance {
 
 pub trait LimitedTransmit where Self: SlowStartCongestionAvoidance {
     fn get_limited_transmit_cwnd_increase(&self) -> u32 { 0 }
-    fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>);
+    fn watch_limited_transmit_cwnd_increase(&self) -> (u32, WatchFuture<'_, u32>) {(0, WatchFuture::Pending) }
 } 
 
 
