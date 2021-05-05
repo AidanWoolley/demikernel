@@ -45,7 +45,7 @@ pub struct Cubic {
 }
 
 impl CongestionControl for Cubic {
-    fn new(mss: usize, seq_no: SeqNumber, options: Option<Options>) -> Self {
+    fn new(mss: usize, seq_no: SeqNumber, options: Option<Options>) -> Box<dyn CongestionControl> {
         let mss: u32 = mss.try_into().unwrap();
         // The initial value of cwnd is set according to RFC5681, section 3.1, page 7
         let initial_cwnd = match mss {
@@ -57,7 +57,7 @@ impl CongestionControl for Cubic {
         let options: Options = options.unwrap_or_default();
         let fast_convergence = options.get_bool("fast_convergence").unwrap_or(true);
 
-        Self {
+        Box::new(Self {
             mss,
             // Slow Start / Congestion Avoidance State
             ca_start: Cell::new(Instant::now()), // record the start time of the congestion avoidance period
@@ -78,7 +78,7 @@ impl CongestionControl for Cubic {
             duplicate_ack_count: Cell::new(0),
 
             limited_transmit_cwnd_increase: WatchedValue::new(0),
-        }
+        })
     }
 }
 

@@ -1,9 +1,6 @@
 use super::{
     rto::RtoCalculator,
-    congestion_ctrl::{
-        self as cc,
-        CongestionControl
-    },
+    congestion_ctrl as cc
 };
 use crate::{
     collections::watched::WatchedValue,
@@ -87,11 +84,7 @@ impl fmt::Debug for Sender {
 }
 
 impl Sender {
-    pub fn new(seq_no: SeqNumber, window_size: u32, window_scale: u8, mss: usize, congestion_ctrl_type: cc::Type, congestion_control_options: Option<cc::Options>) -> Self {
-        let congestion_ctrl: Box<dyn cc::CongestionControl> = match congestion_ctrl_type {
-            cc::Type::None => Box::new(cc::None::new(mss, seq_no, congestion_control_options)),
-            cc::Type::Cubic => Box::new(cc::Cubic::new(mss, seq_no, congestion_control_options)),
-        }; 
+    pub fn new(seq_no: SeqNumber, window_size: u32, window_scale: u8, mss: usize, cc_constructor: cc::CongestionControlConstructor, congestion_control_options: Option<cc::Options>) -> Self {
         Self {
             state: WatchedValue::new(SenderState::Open),
 
@@ -108,7 +101,7 @@ impl Sender {
             retransmit_deadline: WatchedValue::new(None),
             rto: RefCell::new(RtoCalculator::new()),
 
-            congestion_ctrl,
+            congestion_ctrl: cc_constructor(mss, seq_no, congestion_control_options),
         }
     }
 

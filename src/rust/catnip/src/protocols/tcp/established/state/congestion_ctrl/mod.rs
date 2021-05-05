@@ -14,7 +14,6 @@ pub use self::{
     options::{
         Options,
         OptionValue,
-        Type,
     },
 };
 
@@ -54,8 +53,7 @@ pub trait CongestionControl: SlowStartCongestionAvoidance +
                              FastRetransmitRecovery +
                              LimitedTransmit +
                              Debug {
-    // TODO: Explore passing the Sender constructor a function pointer of the correct type.
-    fn new(mss: usize, seq_no: SeqNumber, options: Option<options::Options>) -> Box<Self> where Self: Sized;
+    fn new(mss: usize, seq_no: SeqNumber, options: Option<options::Options>) -> Box<dyn CongestionControl> where Self: Sized;
 }
 
-type CongestionControlConstructor = fn(usize, SeqNumber, Option<options::Options>) -> Box<dyn CongestionControl>;
+pub type CongestionControlConstructor = fn(usize, SeqNumber, Option<options::Options>) -> Box<dyn CongestionControl>;

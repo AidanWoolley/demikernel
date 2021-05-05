@@ -6,7 +6,7 @@ use catnip::{
     protocols::{
         arp,
         ethernet2::{frame::Ethernet2Header, MacAddress},
-        tcp,
+        tcp::{self, congestion_ctrl::{self, CongestionControl}}
     },
     runtime::{
         PacketBuf,
@@ -134,7 +134,7 @@ impl MininetRuntime {
     }
 
     pub fn disable_congestion_control(&mut self) {
-        self.inner.borrow_mut().tcp_options.congestion_ctrl_type = tcp::CongestionControlType::None;
+        self.inner.borrow_mut().tcp_options.congestion_ctrl_type = congestion_ctrl::None::new;
     }
 }
 
