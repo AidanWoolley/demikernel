@@ -115,7 +115,7 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         let segment_data_len = segment_data.len();
         assert!(segment_data_len > 0);
 
-        cb.sender.congestion_ctrl.on_send(&cb.sender);
+        cb.sender.congestion_ctrl.on_send(&cb.sender, sent_data);
 
         let mut header = cb.tcp_header();
         header.seq_num = sent_seq;

@@ -30,7 +30,7 @@ pub trait SlowStartCongestionAvoidance {
     fn on_rto(&self, _sender: &Sender) {}
 
     // Called immediately before a segment is sent for the 1st time
-    fn on_send(&self, _sender: &Sender) {}
+    fn on_send(&self, _sender: &Sender, _num_sent_bytes: u32) {}
 }
 
 pub trait FastRetransmitRecovery where Self: SlowStartCongestionAvoidance {

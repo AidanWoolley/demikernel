@@ -101,20 +101,12 @@ impl Cubic {
         }
     }
 
-    fn calculate_limited_transmit_cwnd_increase(&self) {
-        let dup_ack_count = self.duplicate_ack_count.get();
-        let limited_transmit_increase = if dup_ack_count < Self::DUP_ACK_THRESHOLD {
-            self.mss * dup_ack_count
-        } else {
-            0
-        };
-        self.limited_transmit_cwnd_increase.set(limited_transmit_increase);
-    }
-
     fn increment_dup_ack_count(&self) -> u32 {
         let duplicate_ack_count = self.duplicate_ack_count.get() + 1;
         self.duplicate_ack_count.set(duplicate_ack_count);
-        self.calculate_limited_transmit_cwnd_increase();
+        if duplicate_ack_count < Self::DUP_ACK_THRESHOLD {
+            self.limited_transmit_cwnd_increase.modify(|ltci| ltci + self.mss);
+        }
         duplicate_ack_count
 
     }
@@ -277,12 +269,16 @@ impl SlowStartCongestionAvoidance for Cubic {
         if long_time_since_send {
             let restart_window = min(self.initial_cwnd, self.cwnd.get());
             self.cwnd.set(restart_window);
+            self.limited_transmit_cwnd_increase.set_without_notify(0);
         }
     }
 
-    fn on_send(&self, sender: &Sender) {
+    fn on_send(&self, sender: &Sender, num_bytes_sent: u32) {
         self.last_send_time.set(Instant::now());
-        self.rtt_at_last_send.set(sender.current_rto())
+        self.rtt_at_last_send.set(sender.current_rto());
+        self.limited_transmit_cwnd_increase.set_without_notify(
+            self.limited_transmit_cwnd_increase.get().saturating_sub(num_bytes_sent)
+        );
     }
 
     fn on_ack_received(&self, sender: &Sender, ack_seq_no: SeqNumber) {
@@ -293,7 +289,6 @@ impl SlowStartCongestionAvoidance for Cubic {
             self.retransmitted_packets_in_flight.set(self.retransmitted_packets_in_flight.get() - 1);
         } else {
             self.duplicate_ack_count.set(0);
-            self.calculate_limited_transmit_cwnd_increase();
 
             if self.in_fast_recovery.get() {
                 // Fast Recovery response to new data
