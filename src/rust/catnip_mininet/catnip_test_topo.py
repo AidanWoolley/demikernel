@@ -2,13 +2,14 @@
 
 Two directly connected switches plus a host for each switch:
 
-   host --- switch --- switch --- host
+   host --- switch --- host
 
 Adding the 'topos' dict with a key/value pair to generate our newly defined
 topology enables one to pass in '--topo=mytopo' from the command line.
 """
 
 from mininet.topo import Topo
+from mininet.link import TCLink
 
 class CatnipTopo(Topo):
     "Simple topology example."
@@ -26,8 +27,8 @@ class CatnipTopo(Topo):
         switch = self.addSwitch("s1")
 
         # Add links
-        self.addLink(alice, switch)
-        self.addLink(switch, bob)
+        self.addLink(alice, switch, cls=TCLink, bw=10, delay="50ms")
+        self.addLink(switch, bob, cls=TCLink, bw=10, delay="50ms")
 
 
 topos = {'catniptopo': lambda: CatnipTopo()}
