@@ -182,25 +182,27 @@ impl Cubic {
         }
     }
 
-    fn k(&self, mss: f32) -> f32 {
+    fn k(&self, w_max: f32) -> f32 {
+        // While we store w_max in terms of bytes, we have pre-normalised it to units of MSS
+        // for compatibility with RFC8312
         if self.last_congestion_was_rto.get() {
             0.0
         } else {
-            (self.w_max.get() as f32 * (1.-Self::BETA_CUBIC)/(Self::C * mss)).cbrt()
+            (w_max * (1.-Self::BETA_CUBIC)/Self::C).cbrt()
         }
     }
 
-    fn w_cubic(&self, t: f32, k: f32, mss: f32) -> f32 {
-        // The equation in RFC8312 is in terms of MSS but we want to store cwnd in terms of bytes,
-        // hence we multiply the return value by MSS
-        let w_max = self.w_max.get() as f32;
-        (Self::C*(t-k)).powi(3) + w_max/mss
+    fn w_cubic(&self, w_max: f32, t: f32, k: f32) -> f32 {
+        // While we store w_max in terms of bytes, we have pre-normalised it to units of MSS
+        // for compatibility with RFC8312
+        (Self::C)*(t-k).powi(3) + w_max
     }
 
-    fn w_est(&self, t: f32, rtt: f32, mss: f32) -> f32 {
+    fn w_est(&self, w_max: f32, t: f32, rtt: f32) -> f32 {
+        // While we store w_max in terms of bytes, we have pre-normalised it to units of MSS
+        // for compatibility with RFC8312
         let bc = Self::BETA_CUBIC;
-        let w_max = self.w_max.get() as f32;
-        w_max * bc / mss + (3. * (1. - bc) / (1. + bc)) * t / rtt
+        w_max * bc + ((3. * (1. - bc) / (1. + bc)) * t / rtt)
     }
 
     fn on_ack_received_ss_ca(&self, sender: &Sender, ack_seq_no: SeqNumber) { 
@@ -217,13 +219,17 @@ impl Cubic {
             let t = self.ca_start.get().elapsed().as_secs_f32();
             let rtt = sender.current_rto().as_secs_f32();
             let mss_f32 = mss as f32;
-            let k = self.k(mss_f32);
-            let w_est = self.w_est(t, rtt, mss_f32);
-            if self.w_cubic(t, k, mss_f32) < w_est { 
+            let normalised_w_max = self.w_max.get() as f32 / mss_f32;
+            let k = self.k(normalised_w_max);
+            let w_est = self.w_est(normalised_w_max, t, rtt);
+            if self.w_cubic(normalised_w_max, t, k) < w_est {
+                // w_est return units of MSS which we multiply back up to get bytes
                 self.cwnd.set((w_est * mss_f32) as u32); 
             } else {
                 let cwnd_f32 = cwnd as f32;
-                let cwnd_inc = ((self.w_cubic(t + rtt, k, mss_f32) * mss_f32) - cwnd_f32) / cwnd_f32;
+                // Again, do everythin in terms of units of MSS
+                let normalised_cwnd = cwnd_f32 / mss_f32;
+                let cwnd_inc = ((self.w_cubic(normalised_w_max, t + rtt, k) - normalised_cwnd) / normalised_cwnd) * mss_f32;
                 self.cwnd.modify(|c| c + cwnd_inc as u32);
             }
         }
