@@ -196,7 +196,7 @@ impl Receiver {
         // According to RFC1122, we ACK every 2nd consecutive full-size segment no matter what
         if buf_len == self.mss {
             if self.last_segment_was_full_size.get() {
-                if self.recv_seq_no.get() - self.ack_seq_no.get() > Wrapping(2 * self.mss as u32) {
+                if self.recv_seq_no.get() - self.ack_seq_no.get() >= Wrapping(2 * self.mss as u32) {
                     self.ack_deadline.set(Some(now));
                 }
             } else {
