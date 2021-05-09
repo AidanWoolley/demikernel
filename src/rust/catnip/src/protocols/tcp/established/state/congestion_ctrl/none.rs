@@ -13,7 +13,9 @@ use std::fmt::Debug;
 pub struct None {}
 
 impl CongestionControl for None {
-    fn new(_mss: usize, _seq_no: SeqNumber, _options: Option<Options>) -> Box<dyn CongestionControl> { Box::new(Self {}) }
+    fn new(_mss: usize, _seq_no: SeqNumber, _options: Option<Options>) -> Box<dyn CongestionControl> {
+        Box::new(Self {})
+    }
 }
 
 impl SlowStartCongestionAvoidance for None {}
