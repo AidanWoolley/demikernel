@@ -176,6 +176,7 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
         let receiver = Receiver::new(
             remote_seq_num,
             self.rt.tcp_options().receive_window_size as u32,
+            mss
         );
         let cb = ControlBlock {
             local: self.local.clone(),

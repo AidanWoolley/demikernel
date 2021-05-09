@@ -170,6 +170,7 @@ impl<RT: Runtime> PassiveSocket<RT> {
             let receiver = Receiver::new(
                 remote_isn + Wrapping(1),
                 self.rt.tcp_options().receive_window_size as u32,
+                mss
             );
             self.inflight.remove(&remote);
             let cb = ControlBlock {
