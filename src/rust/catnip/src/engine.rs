@@ -70,8 +70,8 @@ impl<RT: Runtime> Engine<RT> {
         })
     }
 
-    pub fn rt(&self) -> &RT {
-        &self.rt
+    pub fn rt(&mut self) -> &mut RT {
+        &mut self.rt
     }
 
     pub fn receive(&mut self, bytes: Bytes) -> Result<(), Fail> {
