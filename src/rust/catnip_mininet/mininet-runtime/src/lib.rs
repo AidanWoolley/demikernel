@@ -63,7 +63,7 @@ pub const BOB_MAC: MacAddress = MacAddress::new([0x12, 0x23, 0x45, 0x67, 0x89, 0
 pub const BOB_IPV4: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
 pub const PORT_NO: u16 = 8000;
 pub const ETH_P_ALL: u16 = (libc::ETH_P_ALL as u16).to_be();
-pub const TEST_DATA_LEN: usize = 1<<30;
+pub const TEST_DATA_LEN: usize = 1<<20;
 
 #[derive(Clone)]
 pub struct MininetRuntime {
