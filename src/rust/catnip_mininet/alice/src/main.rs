@@ -53,6 +53,10 @@ fn main() {
         }
     }
     println!("Connection Established at Alice!!");
+    let alice_cc  = match alice_cb.sender.congestion_ctrl.as_any().downcast_ref::<congestion_ctrl::Cubic>() {
+        Some(alice_cc) => alice_cc,
+        None => panic!("Congestion control type is wrong!!!")
+    };
 
     let mut send_future = alice.tcp_push(alice_fd, BytesMut::zeroed(TEST_DATA_LEN).freeze());
     match Future::poll(Pin::new(&mut send_future), &mut ctx) {

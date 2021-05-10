@@ -3,7 +3,10 @@ use crate::{
     collections::watched::WatchFuture,
     protocols::tcp::SeqNumber,
 };
-use std::fmt::Debug;
+use std::{
+    any::Any,
+    fmt::Debug
+};
 
 mod cubic;
 mod none;
@@ -54,6 +57,7 @@ pub trait CongestionControl: SlowStartCongestionAvoidance +
                              LimitedTransmit +
                              Debug {
     fn new(mss: usize, seq_no: SeqNumber, options: Option<options::Options>) -> Box<dyn CongestionControl> where Self: Sized;
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub type CongestionControlConstructor = fn(usize, SeqNumber, Option<options::Options>) -> Box<dyn CongestionControl>;

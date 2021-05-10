@@ -6,7 +6,10 @@ use super::{
     LimitedTransmit,
 };
 use crate::protocols::tcp::SeqNumber;
-use std::fmt::Debug;
+use std::{
+    any::Any,
+    fmt::Debug
+};
 
 // Implementation of congestion control which does nothing.
 #[derive(Debug)]
@@ -15,6 +18,9 @@ pub struct None {}
 impl CongestionControl for None {
     fn new(_mss: usize, _seq_no: SeqNumber, _options: Option<Options>) -> Box<dyn CongestionControl> {
         Box::new(Self {})
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

@@ -11,6 +11,7 @@ use crate::{
     protocols::tcp::SeqNumber,
 };
 use std::{
+    any::Any,
     cell::Cell,
     cmp::{max, min},
     convert::TryInto,
@@ -79,6 +80,10 @@ impl CongestionControl for Cubic {
 
             limited_transmit_cwnd_increase: WatchedValue::new(0),
         })
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
