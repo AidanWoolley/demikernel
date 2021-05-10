@@ -291,7 +291,12 @@ impl TcpHeader {
         if data_offset > MIN_TCP_HEADER2_SIZE {
             let mut option_rdr = Cursor::new(&hdr_buf[MIN_TCP_HEADER2_SIZE..data_offset]);
             loop {
-                let option_kind = option_rdr.read_u8()?;
+                // Since this was necessary to make a connection to a Linux socket, I'm confident(ish)
+                // it's the right thing to do not to just error out.
+                let option_kind = option_rdr.read_u8().unwrap_or_else(|_| {
+                    println!("Reading TCP option kind failed, defaulting to 0 (stop parsing)");
+                    0
+                });
                 let option = match option_kind {
                     0 => break,
                     1 => continue,
