@@ -88,8 +88,9 @@ impl MininetRuntime {
         let socket = Socket::new(Domain::packet(), Type::raw(), Some((ETH_P_ALL as libc::c_int).into())).unwrap();
         // Set the read timeout to 1us which is the minimum possible as receive mustn't be async
         socket.set_read_timeout(Some(Duration::from_micros(1))).unwrap();
-        // Don't want issues with receiving to the raw socket so increase its buffer size just in case
-        socket.set_recv_buffer_size(1<<20).unwrap();
+        // // Don't want issues with receiving to the raw socket so increase its buffer size just in case
+        // socket.set_recv_buffer_size(TEST_DATA_LEN).unwrap();
+        // socket.set_send_buffer_size(TEST_DATA_LEN).unwrap();
 
         let ifindex: i32 = fs::read_to_string(format!("/sys/class/net/{}-eth0/ifindex", name)).expect("Could not read ifindex").trim().parse().unwrap();
 
