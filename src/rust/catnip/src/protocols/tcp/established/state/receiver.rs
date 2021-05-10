@@ -194,18 +194,25 @@ impl Receiver {
 
         // TODO: How do we handle when the other side is in PERSIST state here?
         // According to RFC1122, we ACK every 2nd consecutive full-size segment no matter what
-        if buf_len == self.mss {
-            if self.last_segment_was_full_size.get() {
-                if self.recv_seq_no.get() - self.ack_seq_no.get() >= Wrapping(2 * self.mss as u32) {
+        let rsn = self.recv_seq_no.get();
+        let asn = self.ack_seq_no.get();
+
+        // If the last segment had size MSS, this has size MSS and we have at least 2 * MSS bytes to ACK, ACK now
+        if buf_len == self.mss && self.last_segment_was_full_size.get() && rsn - asn >= Wrapping(2 * self.mss as u32) {
                     self.ack_deadline.set(Some(now));
-                }
-            } else {
+        } else if buf_len == self.mss {
                 self.last_segment_was_full_size.set(true);
+            if self.ack_deadline.get().is_none() {
+                // TODO: Configure this value (and also maybe just have an RT pointer here.)
+                self.ack_deadline
+                    .set(Some(now + Duration::from_millis(500)));
             }
         } else if self.ack_deadline.get().is_none() {
+            self.last_segment_was_full_size.set(false);
             // TODO: Configure this value (and also maybe just have an RT pointer here.)
             self.ack_deadline
                 .set(Some(now + Duration::from_millis(500)));
+        } else {
             self.last_segment_was_full_size.set(false);
         }
 
