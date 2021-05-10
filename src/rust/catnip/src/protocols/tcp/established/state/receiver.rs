@@ -80,7 +80,6 @@ impl Receiver {
     pub fn current_ack(&self) -> Option<SeqNumber> {
         // RFC 793 Section 3.3 Page 16:
         // Once a connection is established, the ACK field is ALWAYS SENT
-        let ack_seq_no = self.ack_seq_no.get();
         let recv_seq_no = self.recv_seq_no.get();
             Some(recv_seq_no)
     }
