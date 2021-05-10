@@ -109,7 +109,7 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         let remote_link_addr = cb.arp.query(cb.remote.address()).await?;
 
         // Form an outgoing packet.
-        let max_size = cmp::min(cmp::min((win_sz - sent_data) as usize, cb.sender.mss), (cwnd - sent_data) as usize);
+        let max_size = cmp::min(cmp::min((win_sz - sent_data) as usize, cb.sender.mss), (effective_cwnd - sent_data) as usize);
         let segment_data = cb
             .sender
             .pop_unsent(max_size)
