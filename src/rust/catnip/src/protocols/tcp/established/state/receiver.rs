@@ -46,6 +46,7 @@ pub struct Receiver {
     // According to RFC1122, even when using delayed ACKs, we must ACK at least every second
     // full segment immediately, so we track if the last segment was full-size
     pub last_segment_was_full_size: Cell<bool>,
+    pub acked_last_full_size_segment: Cell<bool>,
     pub mss: usize,
 
     pub max_window_size: u32,
@@ -64,6 +65,7 @@ impl Receiver {
             available: Cell::new(0),
             ack_deadline: WatchedValue::new(None),
             last_segment_was_full_size: Cell::new(false),
+            acked_last_full_size_segment: Cell::new(false),
             mss,
             max_window_size,
             waker: RefCell::new(None),
@@ -194,14 +196,16 @@ impl Receiver {
 
         // TODO: How do we handle when the other side is in PERSIST state here?
         // According to RFC1122, we ACK every 2nd consecutive full-size segment no matter what
-        let rsn = self.recv_seq_no.get();
-        let asn = self.ack_seq_no.get();
+
+        
 
         // If the last segment had size MSS, this has size MSS and we have at least 2 * MSS bytes to ACK, ACK now
-        if buf_len == self.mss && self.last_segment_was_full_size.get() && rsn - asn >= Wrapping(2 * self.mss as u32) {
+        if buf_len == self.mss && self.last_segment_was_full_size.get() && !self.acked_last_full_size_segment.get() {
+            self.acked_last_full_size_segment.set(true);
                     self.ack_deadline.set(Some(now));
         } else if buf_len == self.mss {
                 self.last_segment_was_full_size.set(true);
+            self.acked_last_full_size_segment.set(false);
             if self.ack_deadline.get().is_none() {
                 // TODO: Configure this value (and also maybe just have an RT pointer here.)
                 self.ack_deadline
