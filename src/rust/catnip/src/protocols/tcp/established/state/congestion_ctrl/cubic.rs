@@ -240,7 +240,7 @@ impl Cubic {
         } else {
             self.w_max.set(cwnd);
         }
-        self.cwnd.set(((cwnd as f32) * Self::BETA_CUBIC) as u32);
+        self.cwnd.set(self.mss);
 
         let rpif = self.retransmitted_packets_in_flight.get();
         if rpif == 0 {
