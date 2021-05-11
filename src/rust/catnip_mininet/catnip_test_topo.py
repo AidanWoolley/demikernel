@@ -28,9 +28,9 @@ class CatnipTopo(Topo):
         s_bob = self.addSwitch("s2")
 
         # Add links
-        self.addLink(alice, s_alice, cls=TCULink, bw=10, delay="50ms")
-        self.addLink(s_alice, s_bob, cls=TCULink, bw=1, max_queue_size=10, delay="50ms")
-        self.addLink(s_bob, bob, cls=TCULink, bw=10, delay="50ms")
+        self.addLink(alice, s_alice, cls=TCULink)
+        self.addLink(s_alice, s_bob, cls=TCULink)
+        self.addLink(s_bob, bob, cls=TCULink)
 
 
 topos = {'catniptopo': lambda: CatnipTopo()}
