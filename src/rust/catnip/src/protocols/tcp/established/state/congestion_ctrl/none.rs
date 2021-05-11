@@ -7,7 +7,6 @@ use super::{
 };
 use crate::protocols::tcp::SeqNumber;
 use std::{
-    any::Any,
     fmt::Debug
 };
 
@@ -18,9 +17,6 @@ pub struct None {}
 impl CongestionControl for None {
     fn new(_mss: usize, _seq_no: SeqNumber, _options: Option<Options>) -> Box<dyn CongestionControl> {
         Box::new(Self {})
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 

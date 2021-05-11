@@ -4,7 +4,6 @@ use crate::{
     protocols::tcp::SeqNumber,
 };
 use std::{
-    any::Any,
     fmt::Debug
 };
 
@@ -57,7 +56,6 @@ pub trait CongestionControl: SlowStartCongestionAvoidance +
                              LimitedTransmit +
                              Debug {
     fn new(mss: usize, seq_no: SeqNumber, options: Option<options::Options>) -> Box<dyn CongestionControl> where Self: Sized;
-    fn as_any(&self) -> &dyn Any;
 }
 
 pub type CongestionControlConstructor = fn(usize, SeqNumber, Option<options::Options>) -> Box<dyn CongestionControl>;
