@@ -1,10 +1,11 @@
 use catnip::{
-    protocols::{ 
+    protocols::{
         ip,
         ipv4,
+        tcp::congestion_ctrl
     },
     runtime::Runtime,
-    sync::BytesMut,
+    sync::BytesMut
 };
 use futures::task::noop_waker_ref;
 use mininet_runtime::*;
@@ -16,14 +17,15 @@ use std::{
         Context,
         Poll,
     },
-    time::Instant,
+    time::Instant
 };
+
 fn main() {
     // Create async context object
     let mut ctx = Context::from_waker(noop_waker_ref());
     // Create alice engine to attempt socket connect and send data
     let mut alice = new_mininet_engine("alice", Instant::now(), ALICE_MAC, ALICE_IPV4);
-    
+    // alice.rt().disable_congestion_control();
     println!("Created Alice");
 
     // Establish the connection between the two peers.
@@ -45,7 +47,7 @@ fn main() {
                 Err(fail) => println!("{}", fail.to_string()),
             }
         }
-
+        
         match Future::poll(Pin::new(&mut connect_future), &mut ctx) {
             Poll::Ready(Ok(cb_handle)) => { alice_cb = cb_handle; break; },
             Poll::Pending => continue,
@@ -53,11 +55,7 @@ fn main() {
         }
     }
     println!("Connection Established at Alice!!");
-    let alice_cc  = match alice_cb.sender.congestion_ctrl.as_any().downcast_ref::<congestion_ctrl::Cubic>() {
-        Some(alice_cc) => alice_cc,
-        None => panic!("Congestion control type is wrong!!!")
-    };
-
+    
     let mut send_future = alice.tcp_push(alice_fd, BytesMut::zeroed(TEST_DATA_LEN).freeze());
     match Future::poll(Pin::new(&mut send_future), &mut ctx) {
         Poll::Ready(Ok(())) => (),
@@ -65,17 +63,17 @@ fn main() {
     }
     alice.rt().poll_scheduler();
     println!("PushFuture resolved");
-    
+
     while alice_cb.sender.unsent_queue.borrow().len() != 0 || alice_cb.sender.unacked_queue.borrow().len() != 0 {
         alice.rt().poll_scheduler();
         alice.rt().advance_clock(Instant::now());
-
+        
         if let Some(data) = alice.rt().receive() {
             match alice.receive(data) {
                 Ok(_) => (),
                 Err(fail) => println!("{}", fail.to_string()),
             }
-            println!("RTT Estimate {:?}", alice_cb.sender.rto.borrow().estimate());
+            // println!("RTT Estimate {:?}", alice_cb.sender.rto.borrow().estimate());
         }
 
     }
