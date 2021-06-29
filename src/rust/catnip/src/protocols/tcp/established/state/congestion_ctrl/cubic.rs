@@ -117,11 +117,10 @@ impl Cubic {
 
         let prev_ack_seq_no = self.prev_ack_seq_no.get();
         let ack_seq_no_diff = if ack_seq_no > prev_ack_seq_no {
-            ack_seq_no.0 - prev_ack_seq_no.0
+            (ack_seq_no - prev_ack_seq_no).0
         } else {
             // Handle the case where the current ack_seq_no has wrapped and the previous hasn't
-            // The brackets are insurance against an overflow error
-            ack_seq_no.0 + 1 + (u32::MAX - prev_ack_seq_no.0)
+            (prev_ack_seq_no - ack_seq_no).0
         };
         let cwnd = self.cwnd.get();
         let ack_covers_recover = ack_seq_no - Wrapping(1) > self.recover.get();
@@ -286,7 +285,9 @@ impl SlowStartCongestionAvoidance for Cubic {
         if bytes_acknowledged.0 == 0 {
             // ACK is a duplicate
             self.on_dup_ack_received(sender, ack_seq_no);
-            self.retransmitted_packets_in_flight.set(self.retransmitted_packets_in_flight.get() - 1);
+            // We attempt to keep track of the number of retransmitted packets in flight because we do not alter
+            // ssthresh if a packet is lost when it has been retransmitted. There is almost certainly a better way.
+            self.retransmitted_packets_in_flight.set(self.retransmitted_packets_in_flight.get().saturating_sub(1));
         } else {
             self.duplicate_ack_count.set(0);
 
