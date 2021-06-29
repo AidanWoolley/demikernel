@@ -5,7 +5,7 @@ use crate::{
     sync::Bytes,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::VecDeque,
     num::Wrapping,
     task::{
@@ -40,8 +40,14 @@ pub struct Receiver {
     pub recv_queue: RefCell<VecDeque<Bytes>>,
     pub ack_seq_no: WatchedValue<SeqNumber>,
     pub recv_seq_no: WatchedValue<SeqNumber>,
+    pub available: Cell<usize>,
 
     pub ack_deadline: WatchedValue<Option<Instant>>,
+    // According to RFC1122, even when using delayed ACKs, we must ACK at least every second
+    // full segment immediately, so we track if the last segment was full-size
+    pub last_segment_was_full_size: Cell<bool>,
+    pub acked_last_full_size_segment: Cell<bool>,
+    pub mss: usize,
 
     pub max_window_size: u32,
 
@@ -49,14 +55,18 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    pub fn new(seq_no: SeqNumber, max_window_size: u32) -> Self {
+    pub fn new(seq_no: SeqNumber, max_window_size: u32, mss: usize) -> Self {
         Self {
             state: WatchedValue::new(ReceiverState::Open),
             base_seq_no: WatchedValue::new(seq_no),
             recv_queue: RefCell::new(VecDeque::new()),
             ack_seq_no: WatchedValue::new(seq_no),
             recv_seq_no: WatchedValue::new(seq_no),
+            available: Cell::new(0),
             ack_deadline: WatchedValue::new(None),
+            last_segment_was_full_size: Cell::new(false),
+            acked_last_full_size_segment: Cell::new(false),
+            mss,
             max_window_size,
             waker: RefCell::new(None),
         }
@@ -68,13 +78,10 @@ impl Receiver {
     }
 
     pub fn current_ack(&self) -> Option<SeqNumber> {
-        let ack_seq_no = self.ack_seq_no.get();
+        // RFC 793 Section 3.3 Page 16:
+        // Once a connection is established, the ACK field is ALWAYS SENT
         let recv_seq_no = self.recv_seq_no.get();
-        if ack_seq_no < recv_seq_no {
             Some(recv_seq_no)
-        } else {
-            None
-        }
     }
 
     pub fn ack_sent(&self, seq_no: SeqNumber) {
@@ -122,7 +129,7 @@ impl Receiver {
             .expect("recv_seq > base_seq without data in queue?");
         self.base_seq_no
             .modify(|b| b + Wrapping(segment.len() as u32));
-
+            self.available.set(self.available.get() - segment.len());
         Ok(Some(segment))
     }
 
@@ -144,7 +151,7 @@ impl Receiver {
             .expect("recv_seq > base_seq without data in queue?");
         self.base_seq_no
             .modify(|b| b + Wrapping(segment.len() as u32));
-
+        self.available.set(self.available.get() - segment.len());
         Poll::Ready(Ok(segment))
     }
 
@@ -154,6 +161,7 @@ impl Receiver {
     }
 
     pub fn receive_data(&self, seq_no: SeqNumber, buf: Bytes, now: Instant) -> Result<(), Fail> {
+        let buf_len = buf.len();
         if self.state.get() != ReceiverState::Open {
             return Err(Fail::ResourceNotFound {
                 details: "Receiver closed",
@@ -172,21 +180,38 @@ impl Receiver {
             .iter()
             .map(|b| b.len())
             .sum::<usize>();
-        if unread_bytes + buf.len() > self.max_window_size as usize {
+        if unread_bytes + buf_len > self.max_window_size as usize {
             return Err(Fail::Ignored {
                 details: "Full receive window",
             });
         }
 
-        self.recv_seq_no.modify(|r| r + Wrapping(buf.len() as u32));
+        self.recv_seq_no.modify(|r| r + Wrapping(buf_len as u32));
+        self.available.set(self.available.get() + buf_len);
         self.recv_queue.borrow_mut().push_back(buf);
         self.waker.borrow_mut().take().map(|w| w.wake());
 
         // TODO: How do we handle when the other side is in PERSIST state here?
-        if self.ack_deadline.get().is_none() {
+        // According to RFC1122, we ACK every 2nd consecutive full-size segment no matter what
+        // If the last segment had size MSS, this has size MSS and we have at least 2 * MSS bytes to ACK, ACK now
+        if buf_len == self.mss && self.last_segment_was_full_size.get() && !self.acked_last_full_size_segment.get() {
+            self.acked_last_full_size_segment.set(true);
+                    self.ack_deadline.set(Some(now));
+        } else if buf_len == self.mss {
+                self.last_segment_was_full_size.set(true);
+            self.acked_last_full_size_segment.set(false);
+            if self.ack_deadline.get().is_none() {
+                // TODO: Configure this value (and also maybe just have an RT pointer here.)
+                self.ack_deadline
+                    .set(Some(now + Duration::from_millis(500)));
+            }
+        } else if self.ack_deadline.get().is_none() {
+            self.last_segment_was_full_size.set(false);
             // TODO: Configure this value (and also maybe just have an RT pointer here.)
             self.ack_deadline
                 .set(Some(now + Duration::from_millis(500)));
+        } else {
+            self.last_segment_was_full_size.set(false);
         }
 
         Ok(())

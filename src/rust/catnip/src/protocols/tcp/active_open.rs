@@ -120,6 +120,7 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
     }
 
     pub fn receive(&mut self, header: &TcpHeader) {
+        let max_window_size: u16 = 1024;
         if header.rst {
             self.set_result(Err(Fail::ConnectionRefused {}));
             return;
@@ -140,6 +141,8 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
         let mut tcp_hdr = TcpHeader::new(self.local.port, self.remote.port);
         tcp_hdr.ack = true;
         tcp_hdr.ack_num = remote_seq_num;
+        tcp_hdr.window_size = max_window_size;
+        tcp_hdr.seq_num = self.local_isn + Wrapping(1);
 
         let segment = TcpSegment {
             ethernet2_hdr: Ethernet2Header {
@@ -176,6 +179,7 @@ impl<RT: Runtime> ActiveOpenSocket<RT> {
         let receiver = Receiver::new(
             remote_seq_num,
             self.rt.tcp_options().receive_window_size as u32,
+            mss
         );
         let cb = ControlBlock {
             local: self.local.clone(),

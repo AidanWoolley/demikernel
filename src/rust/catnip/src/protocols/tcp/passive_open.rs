@@ -1,5 +1,5 @@
 use super::{
-    constants::FALLBACK_MSS,
+    constants::{DEFAULT_MSS, FALLBACK_MSS},
     established::state::{
         receiver::Receiver,
         sender::Sender,
@@ -170,6 +170,7 @@ impl<RT: Runtime> PassiveSocket<RT> {
             let receiver = Receiver::new(
                 remote_isn + Wrapping(1),
                 self.rt.tcp_options().receive_window_size as u32,
+                mss
             );
             self.inflight.remove(&remote);
             let cb = ControlBlock {
@@ -194,19 +195,6 @@ impl<RT: Runtime> PassiveSocket<RT> {
             // TODO: Should we send a RST here?
             return Err(Fail::ConnectionRefused {});
         }
-        let local_isn = self.isn_generator.generate(&self.local, &remote);
-        let remote_isn = header.seq_num;
-        let future = Self::background(
-            local_isn,
-            remote_isn,
-            self.local,
-            remote.clone(),
-            self.rt.clone(),
-            self.arp.clone(),
-            self.ready.clone(),
-        );
-        let handle = self.rt.spawn(future);
-
         let mut window_scale = 1;
         let mut mss = FALLBACK_MSS;
         for option in header.iter_options() {
@@ -215,11 +203,28 @@ impl<RT: Runtime> PassiveSocket<RT> {
                     window_scale = *w;
                 },
                 TcpOptions2::MaximumSegmentSize(m) => {
-                    mss = *m as usize;
+                    if *m as usize <= DEFAULT_MSS {
+                        mss = *m as usize;
+                    }
                 },
                 _ => continue,
             }
         }
+
+        let local_isn = self.isn_generator.generate(&self.local, &remote);
+        let remote_isn = header.seq_num;
+        let future = Self::background(
+            local_isn,
+            remote_isn,
+            self.local,
+            remote.clone(),
+            mss,
+            self.rt.clone(),
+            self.arp.clone(),
+            self.ready.clone(),
+        );
+        let handle = self.rt.spawn(future);
+
         let window_size = header
             .window_size
             .checked_shl(window_scale as u32)
@@ -243,6 +248,7 @@ impl<RT: Runtime> PassiveSocket<RT> {
         remote_isn: SeqNumber,
         local: ipv4::Endpoint,
         remote: ipv4::Endpoint,
+        mss: usize,
         rt: RT,
         arp: arp::Peer<RT>,
         ready: Rc<RefCell<ReadySockets<RT>>>,
@@ -266,6 +272,7 @@ impl<RT: Runtime> PassiveSocket<RT> {
                 tcp_hdr.ack = true;
                 tcp_hdr.ack_num = remote_isn + Wrapping(1);
                 tcp_hdr.window_size = max_window_size;
+                tcp_hdr.push_option(TcpOptions2::MaximumSegmentSize(mss as u16));
 
                 let segment = TcpSegment {
                     ethernet2_hdr: Ethernet2Header {

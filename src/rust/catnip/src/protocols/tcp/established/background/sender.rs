@@ -102,12 +102,14 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
             }
         }
 
+        // Past this point we have data to send and it's valid to send it!
+
         // TODO: Nagle's algorithm
         // TODO: Silly window syndrome
         let remote_link_addr = cb.arp.query(cb.remote.address()).await?;
 
         // Form an outgoing packet.
-        let max_size = cmp::min((win_sz - sent_data) as usize, cb.sender.mss);
+        let max_size = cmp::min(cmp::min((win_sz - sent_data) as usize, cb.sender.mss), (effective_cwnd - sent_data) as usize);
         let segment_data = cb
             .sender
             .pop_unsent(max_size)
@@ -115,7 +117,7 @@ pub async fn sender<RT: Runtime>(cb: Rc<ControlBlock<RT>>) -> Result<!, Fail> {
         let segment_data_len = segment_data.len();
         assert!(segment_data_len > 0);
 
-        cb.sender.congestion_ctrl.on_send(&cb.sender);
+        cb.sender.congestion_ctrl.on_send(&cb.sender, sent_data);
 
         let mut header = cb.tcp_header();
         header.seq_num = sent_seq;

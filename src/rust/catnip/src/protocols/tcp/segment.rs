@@ -291,7 +291,16 @@ impl TcpHeader {
         if data_offset > MIN_TCP_HEADER2_SIZE {
             let mut option_rdr = Cursor::new(&hdr_buf[MIN_TCP_HEADER2_SIZE..data_offset]);
             loop {
-                let option_kind = option_rdr.read_u8()?;
+                // Sometimes we read off the end of the options for some reason, in which case we
+                // stop parsing and continue rather than panic, as everything else works.
+                // Since this was necessary to make a connection to a Linux TCP, I'm confident(ish)
+                // it's the right thing to do not to just error out.
+                // I haven't the time to figure out precisely what's wrong with the option reader, but
+                // this should be investigated further.
+                let option_kind = option_rdr.read_u8().unwrap_or_else(|_| {
+                    println!("Reading TCP option kind failed, defaulting to 0 (stop parsing)");
+                    0
+                });
                 let option = match option_kind {
                     0 => break,
                     1 => continue,

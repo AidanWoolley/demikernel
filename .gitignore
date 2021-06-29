@@ -35,3 +35,6 @@ CTestTestfile.cmake
 
 # astyle
 *.orig
+
+# Rust build output
+**/target/**

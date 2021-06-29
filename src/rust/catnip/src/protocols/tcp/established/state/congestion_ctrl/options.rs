@@ -1,12 +1,6 @@
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
-pub enum Type {
-    None,
-    Cubic,
-}
-
-#[derive(Clone, Debug)]
 pub enum OptionValue {
     Bool(bool),
     Float(f64),
