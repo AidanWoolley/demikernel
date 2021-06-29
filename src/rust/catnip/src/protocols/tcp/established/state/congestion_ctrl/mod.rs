@@ -3,9 +3,7 @@ use crate::{
     collections::watched::WatchFuture,
     protocols::tcp::SeqNumber,
 };
-use std::{
-    fmt::Debug
-};
+use std::fmt::Debug;
 
 mod cubic;
 mod none;

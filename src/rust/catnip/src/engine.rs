@@ -46,7 +46,7 @@ use hashbrown::HashMap;
 pub struct Engine<RT: Runtime> {
     rt: RT,
     arp: arp::Peer<RT>,
-    pub ipv4: ipv4::Peer<RT>,
+    ipv4: ipv4::Peer<RT>,
 
     file_table: FileTable,
 }
@@ -70,8 +70,8 @@ impl<RT: Runtime> Engine<RT> {
         })
     }
 
-    pub fn rt(&mut self) -> &mut RT {
-        &mut self.rt
+    pub fn rt(&self) -> &RT {
+        &self.rt
     }
 
     pub fn receive(&mut self, bytes: Bytes) -> Result<(), Fail> {

@@ -193,9 +193,6 @@ impl Receiver {
 
         // TODO: How do we handle when the other side is in PERSIST state here?
         // According to RFC1122, we ACK every 2nd consecutive full-size segment no matter what
-
-        
-
         // If the last segment had size MSS, this has size MSS and we have at least 2 * MSS bytes to ACK, ACK now
         if buf_len == self.mss && self.last_segment_was_full_size.get() && !self.acked_last_full_size_segment.get() {
             self.acked_last_full_size_segment.set(true);

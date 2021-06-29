@@ -25,7 +25,6 @@ use crate::{
             Ipv4Protocol2,
         },
         tcp::{
-            established::state::ControlBlock,
             operations::{
                 AcceptFuture,
                 ConnectFuture,
@@ -123,7 +122,7 @@ impl<RT: Runtime> Peer<RT> {
         &self,
         fd: FileDescriptor,
         ctx: &mut Context,
-    ) -> Poll<Result<(FileDescriptor, Rc<ControlBlock<RT>>), Fail>> {
+    ) -> Poll<Result<FileDescriptor, Fail>> {
         let mut inner_ = self.inner.borrow_mut();
         let inner = &mut *inner_;
 
@@ -146,7 +145,7 @@ impl<RT: Runtime> Peer<RT> {
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
         };
         let established = EstablishedSocket::new(cb);
-        let cb_handle = established.cb.clone();
+
         let fd = inner.file_table.alloc(File::TcpSocket);
         let key = (established.cb.local.clone(), established.cb.remote.clone());
 
@@ -157,7 +156,7 @@ impl<RT: Runtime> Peer<RT> {
         assert!(inner.sockets.insert(fd, socket).is_none());
         assert!(inner.established.insert(key, established).is_none());
 
-        Poll::Ready(Ok((fd, cb_handle)))
+        Poll::Ready(Ok(fd))
     }
 
     pub fn accept(&self, fd: FileDescriptor) -> AcceptFuture<RT> {
@@ -506,7 +505,7 @@ impl<RT: Runtime> Inner<RT> {
         &mut self,
         fd: FileDescriptor,
         context: &mut Context,
-    ) -> Poll<Result<Rc<ControlBlock<RT>>, Fail>> {
+    ) -> Poll<Result<(), Fail>> {
         let key = match self.sockets.get(&fd) {
             Some(Socket::Connecting { local, remote }) => (*local, *remote),
             Some(..) => {
@@ -534,16 +533,14 @@ impl<RT: Runtime> Inner<RT> {
         self.connecting.remove(&key);
 
         let cb = result?;
-        let established_socket = EstablishedSocket::new(cb);
-        let cb_handle = established_socket.cb.clone();
         assert!(self
             .established
-            .insert(key, established_socket)
+            .insert(key, EstablishedSocket::new(cb))
             .is_none());
         let (local, remote) = key;
         self.sockets
             .insert(fd, Socket::Established { local, remote });
 
-        Poll::Ready(Ok(cb_handle))
+        Poll::Ready(Ok(()))
     }
 }
